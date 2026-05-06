@@ -51,6 +51,7 @@ type DataAccount struct {
 	Credentials        map[string]any `json:"credentials"`
 	Extra              map[string]any `json:"extra,omitempty"`
 	ProxyKey           *string        `json:"proxy_key,omitempty"`
+	GroupIDs           []int64        `json:"group_ids,omitempty"`
 	Concurrency        int            `json:"concurrency"`
 	Priority           int            `json:"priority"`
 	RateMultiplier     *float64       `json:"rate_multiplier,omitempty"`
@@ -204,10 +205,16 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 	}
 
 	proxyKeyToID := make(map[string]int64, len(existingProxies))
+	proxyNameToID := make(map[string]int64, len(existingProxies))
 	for i := range existingProxies {
 		p := existingProxies[i]
 		key := buildProxyKey(p.Protocol, p.Host, p.Port, p.Username, p.Password)
 		proxyKeyToID[key] = p.ID
+		nameKey := normalizeProxyNameKey(p.Name)
+		if nameKey != "" {
+			proxyNameToID[nameKey] = p.ID
+			proxyKeyToID[buildProxyNameKey(p.Name)] = p.ID
+		}
 	}
 
 	for i := range dataPayload.Proxies {
@@ -228,7 +235,19 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 		}
 		normalizedStatus := normalizeProxyStatus(item.Status)
 		if existingID, ok := proxyKeyToID[key]; ok {
-			proxyKeyToID[key] = existingID
+			registerImportedProxyKeys(proxyKeyToID, proxyNameToID, item, key, existingID)
+			result.ProxyReused++
+			if normalizedStatus != "" {
+				if proxy, getErr := h.adminService.GetProxy(ctx, existingID); getErr == nil && proxy != nil && proxy.Status != normalizedStatus {
+					_, _ = h.adminService.UpdateProxy(ctx, existingID, &service.UpdateProxyInput{
+						Status: normalizedStatus,
+					})
+				}
+			}
+			continue
+		}
+		if existingID, ok := proxyNameToID[normalizeProxyNameKey(item.Name)]; ok {
+			registerImportedProxyKeys(proxyKeyToID, proxyNameToID, item, key, existingID)
 			result.ProxyReused++
 			if normalizedStatus != "" {
 				if proxy, getErr := h.adminService.GetProxy(ctx, existingID); getErr == nil && proxy != nil && proxy.Status != normalizedStatus {
@@ -258,7 +277,7 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 			})
 			continue
 		}
-		proxyKeyToID[key] = created.ID
+		registerImportedProxyKeys(proxyKeyToID, proxyNameToID, item, key, created.ID)
 		result.ProxyCreated++
 
 		if normalizedStatus != "" && normalizedStatus != created.Status {
@@ -312,7 +331,7 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 			Concurrency:          item.Concurrency,
 			Priority:             item.Priority,
 			RateMultiplier:       item.RateMultiplier,
-			GroupIDs:             nil,
+			GroupIDs:             item.GroupIDs,
 			ExpiresAt:            item.ExpiresAt,
 			AutoPauseOnExpired:   item.AutoPauseOnExpired,
 			SkipDefaultGroupBind: skipDefaultGroupBind,
@@ -581,6 +600,34 @@ func defaultProxyName(name string) string {
 		return "imported-proxy"
 	}
 	return name
+}
+
+func normalizeProxyNameKey(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func buildProxyNameKey(name string) string {
+	nameKey := normalizeProxyNameKey(name)
+	if nameKey == "" {
+		return ""
+	}
+	return "name|" + nameKey
+}
+
+func registerImportedProxyKeys(proxyKeyToID map[string]int64, proxyNameToID map[string]int64, item DataProxy, importKey string, id int64) {
+	if strings.TrimSpace(importKey) != "" {
+		proxyKeyToID[importKey] = id
+	}
+	canonicalKey := buildProxyKey(item.Protocol, item.Host, item.Port, item.Username, item.Password)
+	if strings.TrimSpace(canonicalKey) != "" {
+		proxyKeyToID[canonicalKey] = id
+	}
+	nameKey := normalizeProxyNameKey(item.Name)
+	if nameKey == "" {
+		return
+	}
+	proxyNameToID[nameKey] = id
+	proxyKeyToID[buildProxyNameKey(item.Name)] = id
 }
 
 // enrichCredentialsFromIDToken performs best-effort extraction of user info fields

@@ -42,6 +42,7 @@ type dataAccount struct {
 	Credentials map[string]any `json:"credentials"`
 	Extra       map[string]any `json:"extra"`
 	ProxyKey    *string        `json:"proxy_key"`
+	GroupIDs    []int64        `json:"group_ids"`
 	Concurrency int            `json:"concurrency"`
 	Priority    int            `json:"priority"`
 }
@@ -273,5 +274,64 @@ func TestImportDataReusesProxyAndSkipsDefaultGroup(t *testing.T) {
 
 	require.Len(t, adminSvc.createdProxies, 0)
 	require.Len(t, adminSvc.createdAccounts, 1)
+	require.True(t, adminSvc.createdAccounts[0].SkipDefaultGroupBind)
+}
+
+func TestImportDataReusesProxyByNameKeyAndBindsGroups(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+
+	adminSvc.proxies = []service.Proxy{
+		{
+			ID:       1,
+			Name:     "local-surge",
+			Protocol: "http",
+			Host:     "127.0.0.1",
+			Port:     6152,
+			Status:   service.StatusActive,
+		},
+	}
+
+	dataPayload := map[string]any{
+		"data": map[string]any{
+			"type":    dataType,
+			"version": dataVersion,
+			"proxies": []map[string]any{
+				{
+					"proxy_key": "name|local-surge",
+					"name":      "local-surge",
+					"protocol":  "http",
+					"host":      "127.0.0.1",
+					"port":      6152,
+					"status":    "active",
+				},
+			},
+			"accounts": []map[string]any{
+				{
+					"name":        "acc",
+					"platform":    service.PlatformOpenAI,
+					"type":        service.AccountTypeOAuth,
+					"credentials": map[string]any{"token": "x"},
+					"proxy_key":   "name|local-surge",
+					"group_ids":   []int64{7},
+					"concurrency": 3,
+					"priority":    50,
+				},
+			},
+		},
+		"skip_default_group_bind": true,
+	}
+
+	body, _ := json.Marshal(dataPayload)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/data", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Len(t, adminSvc.createdProxies, 0)
+	require.Len(t, adminSvc.createdAccounts, 1)
+	require.NotNil(t, adminSvc.createdAccounts[0].ProxyID)
+	require.Equal(t, int64(1), *adminSvc.createdAccounts[0].ProxyID)
+	require.Equal(t, []int64{7}, adminSvc.createdAccounts[0].GroupIDs)
 	require.True(t, adminSvc.createdAccounts[0].SkipDefaultGroupBind)
 }
