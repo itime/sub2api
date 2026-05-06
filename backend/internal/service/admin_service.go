@@ -510,6 +510,8 @@ const (
 
 var ErrRPMStatusUnavailable = infraerrors.New(http.StatusNotImplemented, "RPM_STATUS_UNAVAILABLE", "RPM cache not available")
 
+const defaultOpenAIOAuthProxyName = "local-surge"
+
 // adminServiceImpl implements AdminService
 type adminServiceImpl struct {
 	userRepo             UserRepository
@@ -2316,6 +2318,10 @@ func (s *adminServiceImpl) GetAccountsByIDs(ctx context.Context, ids []int64) ([
 }
 
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
+	if err := s.applyDefaultProxyForOpenAIOAuth(ctx, input); err != nil {
+		return nil, err
+	}
+
 	// 绑定分组
 	groupIDs := input.GroupIDs
 	// 如果没有指定分组,自动绑定对应平台的默认分组
@@ -2417,6 +2423,30 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	}
 
 	return account, nil
+}
+
+func (s *adminServiceImpl) applyDefaultProxyForOpenAIOAuth(ctx context.Context, input *CreateAccountInput) error {
+	if input == nil || input.ProxyID != nil || s.proxyRepo == nil {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(input.Platform), PlatformOpenAI) ||
+		!strings.EqualFold(strings.TrimSpace(input.Type), AccountTypeOAuth) {
+		return nil
+	}
+
+	defaultProxy, err := s.proxyRepo.GetByName(ctx, defaultOpenAIOAuthProxyName)
+	if err != nil {
+		if errors.Is(err, ErrProxyNotFound) {
+			return nil
+		}
+		return fmt.Errorf("get default openai oauth proxy %q: %w", defaultOpenAIOAuthProxyName, err)
+	}
+	if defaultProxy == nil || defaultProxy.ID <= 0 || defaultProxy.Status != StatusActive {
+		return nil
+	}
+	proxyID := defaultProxy.ID
+	input.ProxyID = &proxyID
+	return nil
 }
 
 func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *UpdateAccountInput) (*Account, error) {

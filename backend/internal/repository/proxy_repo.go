@@ -64,6 +64,19 @@ func (r *proxyRepository) GetByID(ctx context.Context, id int64) (*service.Proxy
 	return proxyEntityToService(m), nil
 }
 
+func (r *proxyRepository) GetByName(ctx context.Context, name string) (*service.Proxy, error) {
+	m, err := r.client.Proxy.Query().
+		Where(proxy.NameEQ(strings.TrimSpace(name))).
+		Only(ctx)
+	if err != nil {
+		if dbent.IsNotFound(err) {
+			return nil, service.ErrProxyNotFound
+		}
+		return nil, err
+	}
+	return proxyEntityToService(m), nil
+}
+
 func (r *proxyRepository) ListByIDs(ctx context.Context, ids []int64) ([]service.Proxy, error) {
 	if len(ids) == 0 {
 		return []service.Proxy{}, nil
