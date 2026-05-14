@@ -221,6 +221,10 @@
               <AccountStatusIndicator :account="row" @show-temp-unsched="handleShowTempUnsched" />
             </div>
           </template>
+          <template #cell-rate_limit_reset_at="{ row }">
+            <span v-if="getRateLimitResumeText(row)" class="text-sm text-amber-600 dark:text-amber-400">{{ getRateLimitResumeText(row) }}</span>
+            <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
+          </template>
           <template #cell-schedulable="{ row }">
             <button @click="handleToggleSchedulable(row)" :disabled="togglingSchedulable === row.id" class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800" :class="[row.schedulable ? 'bg-primary-500 hover:bg-primary-600' : 'bg-gray-200 hover:bg-gray-300 dark:bg-dark-600 dark:hover:bg-dark-500']" :title="row.schedulable ? t('admin.accounts.schedulableEnabled') : t('admin.accounts.schedulableDisabled')">
               <span class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out" :class="[row.schedulable ? 'translate-x-4' : 'translate-x-0']" />
@@ -373,7 +377,7 @@ import Icon from '@/components/icons/Icon.vue'
 import ErrorPassthroughRulesModal from '@/components/admin/ErrorPassthroughRulesModal.vue'
 import TLSFingerprintProfilesModal from '@/components/admin/TLSFingerprintProfilesModal.vue'
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
-import { formatDateTime, formatRelativeTime } from '@/utils/format'
+import { formatDateTime, formatRelativeTime, formatCountdown } from '@/utils/format'
 import type { Account, AccountPlatform, AccountType, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel } from '@/types'
 
 const { t } = useI18n()
@@ -472,7 +476,8 @@ const ACCOUNT_SORTABLE_KEYS = new Set([
   'priority',
   'rate_multiplier',
   'last_used_at',
-  'expires_at'
+  'expires_at',
+  'rate_limit_reset_at'
 ])
 const loadInitialAccountSortState = (): AccountSortState => {
   const fallback: AccountSortState = { sort_by: 'name', sort_order: 'asc' }
@@ -1038,6 +1043,7 @@ const allColumns = computed(() => {
     { key: 'platform_type', label: t('admin.accounts.columns.platformType'), sortable: false },
     { key: 'capacity', label: t('admin.accounts.columns.capacity'), sortable: false },
     { key: 'status', label: t('admin.accounts.columns.status'), sortable: true },
+    { key: 'rate_limit_reset_at', label: t('admin.accounts.columns.rateLimitResume'), sortable: true },
     { key: 'schedulable', label: t('admin.accounts.columns.schedulable'), sortable: true },
     { key: 'today_stats', label: t('admin.accounts.columns.todayStats'), sortable: false }
   ]
@@ -1531,6 +1537,13 @@ const handleTempUnschedReset = async (updated: Account) => {
   patchAccountInList(updated)
   enterAutoRefreshSilentWindow()
 }
+const getRateLimitResumeText = (row: Account): string | null => {
+  if (!row.rate_limit_reset_at) return null
+  const resetAt = new Date(row.rate_limit_reset_at)
+  if (resetAt <= new Date()) return null
+  return formatCountdown(row.rate_limit_reset_at)
+}
+
 const formatExpiresAt = (value: number | null) => {
   if (!value) return '-'
   return formatDateTime(

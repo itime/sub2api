@@ -610,6 +610,9 @@ func accountListOrder(params pagination.PaginationParams) []func(*entsql.Selecto
 	case "created_at":
 		field = dbaccount.FieldCreatedAt
 		defaultOrder = false
+	case "rate_limit_reset_at":
+		field = dbaccount.FieldRateLimitResetAt
+		defaultOrder = false
 	}
 
 	if sortOrder == pagination.SortOrderDesc {
