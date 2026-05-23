@@ -1323,7 +1323,7 @@ export default {
       standard: '标准',
       accountCost: '成本',
       todayTokens: '今日 Token',
-      fromAccounts: '来自 {count} 个账号',
+      fromAccounts: '来自 {count} 个账号，其中 {rateLimitCount} 个 429',
       totalTokens: '总 Token',
       input: '输入',
       output: '输出',
@@ -2725,6 +2725,7 @@ export default {
         proxy: '代理',
         lastUsed: '最近使用',
         expiresAt: '过期时间',
+        createdAt: '创建时间',
         actions: '操作'
       },
       allPrivacyModes: '全部Privacy状态',

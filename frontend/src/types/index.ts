@@ -1277,6 +1277,8 @@ export interface DashboardStats {
   today_cost: number // 今日标准计费
   today_actual_cost: number // 今日实际扣除
   today_account_cost: number // 今日账号成本
+  today_active_accounts: number // 今日产生 Token 的不同账号数
+  today_ratelimit_accounts: number
 
   // 系统运行统计
   average_duration_ms: number // 平均响应时间

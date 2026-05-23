@@ -1602,6 +1602,36 @@ func (r *usageLogRepository) fillDashboardUsageStatsAggregated(ctx context.Conte
 		}
 	}
 
+	// 今日产生 Token 的不同账号数（聚合表无账号维度，回退到 usage_logs 直查今日范围）。
+	todayEnd := todayUTC.Add(24 * time.Hour)
+	todayActiveAccountsQuery := `
+		SELECT
+			COUNT(DISTINCT ul.account_id) AS today_active_accounts,
+			COUNT(DISTINCT CASE
+				WHEN (a.rate_limited_at IS NOT NULL AND a.rate_limit_reset_at > $3::timestamptz)
+					OR EXISTS (
+						SELECT 1
+						FROM jsonb_each(COALESCE(a.extra->'model_rate_limits', '{}'::jsonb)) AS model_limit(model_key, model_value)
+						WHERE jsonb_typeof(model_limit.model_value) = 'object'
+							AND CASE
+								WHEN model_limit.model_value->>'rate_limit_reset_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
+									THEN (model_limit.model_value->>'rate_limit_reset_at')::timestamptz > $3::timestamptz
+								ELSE false
+							END
+					) THEN ul.account_id
+			END) AS today_ratelimit_accounts
+		FROM usage_logs ul
+		LEFT JOIN accounts a ON a.id = ul.account_id AND a.deleted_at IS NULL
+		WHERE ul.created_at >= $1::timestamptz
+			AND ul.created_at < $2::timestamptz
+			AND ul.account_id IS NOT NULL
+	`
+	if err := scanSingleRow(ctx, r.sql, todayActiveAccountsQuery, []any{todayUTC, todayEnd, now}, &stats.TodayActiveAccounts, &stats.TodayRateLimitAccounts); err != nil {
+		if err != sql.ErrNoRows {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -1680,17 +1710,37 @@ func (r *usageLogRepository) fillDashboardUsageStatsFromUsageLogs(ctx context.Co
 	hourEnd := hourStart.Add(time.Hour)
 	activeUsersQuery := `
 		WITH scoped AS (
-			SELECT user_id, created_at
+			SELECT user_id, account_id, created_at
 			FROM usage_logs
 			WHERE created_at >= LEAST($1::timestamptz, $3::timestamptz)
 				AND created_at < GREATEST($2::timestamptz, $4::timestamptz)
 		)
 		SELECT
-			COUNT(DISTINCT CASE WHEN created_at >= $1::timestamptz AND created_at < $2::timestamptz THEN user_id END) AS active_users,
-			COUNT(DISTINCT CASE WHEN created_at >= $3::timestamptz AND created_at < $4::timestamptz THEN user_id END) AS hourly_active_users
+			COUNT(DISTINCT CASE WHEN scoped.created_at >= $1::timestamptz AND scoped.created_at < $2::timestamptz THEN scoped.user_id END) AS active_users,
+			COUNT(DISTINCT CASE WHEN scoped.created_at >= $3::timestamptz AND scoped.created_at < $4::timestamptz THEN scoped.user_id END) AS hourly_active_users,
+			COUNT(DISTINCT CASE WHEN scoped.created_at >= $1::timestamptz AND scoped.created_at < $2::timestamptz AND scoped.account_id IS NOT NULL THEN scoped.account_id END) AS today_active_accounts,
+			COUNT(DISTINCT CASE
+				WHEN scoped.created_at >= $1::timestamptz
+					AND scoped.created_at < $2::timestamptz
+					AND scoped.account_id IS NOT NULL
+					AND (
+						(a.rate_limited_at IS NOT NULL AND a.rate_limit_reset_at > $5::timestamptz)
+						OR EXISTS (
+							SELECT 1
+							FROM jsonb_each(COALESCE(a.extra->'model_rate_limits', '{}'::jsonb)) AS model_limit(model_key, model_value)
+							WHERE jsonb_typeof(model_limit.model_value) = 'object'
+								AND CASE
+									WHEN model_limit.model_value->>'rate_limit_reset_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
+										THEN (model_limit.model_value->>'rate_limit_reset_at')::timestamptz > $5::timestamptz
+									ELSE false
+								END
+						)
+					) THEN scoped.account_id
+			END) AS today_ratelimit_accounts
 		FROM scoped
+		LEFT JOIN accounts a ON a.id = scoped.account_id AND a.deleted_at IS NULL
 	`
-	if err := scanSingleRow(ctx, r.sql, activeUsersQuery, []any{todayUTC, todayEnd, hourStart, hourEnd}, &stats.ActiveUsers, &stats.HourlyActiveUsers); err != nil {
+	if err := scanSingleRow(ctx, r.sql, activeUsersQuery, []any{todayUTC, todayEnd, hourStart, hourEnd, now}, &stats.ActiveUsers, &stats.HourlyActiveUsers, &stats.TodayActiveAccounts, &stats.TodayRateLimitAccounts); err != nil {
 		return err
 	}
 

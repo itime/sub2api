@@ -1308,7 +1308,7 @@ export default {
       todayRequests: 'Today Requests',
       newUsersToday: 'New Users Today',
       todayTokens: 'Today Tokens',
-      fromAccounts: 'From {count} accounts',
+      fromAccounts: 'From {count} accounts, {rateLimitCount} with 429',
       totalTokens: 'Total Tokens',
       cacheToday: 'Cache (Today)',
       performance: 'Performance',
@@ -2687,6 +2687,7 @@ export default {
         proxy: 'Proxy',
         lastUsed: 'Last Used',
         expiresAt: 'Expires At',
+        createdAt: 'Created At',
         actions: 'Actions'
       },
       allPrivacyModes: 'All Privacy States',

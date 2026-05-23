@@ -673,16 +673,27 @@ func (s *UsageLogRepoSuite) TestDashboardStats_TodayTotalsAndPerformance() {
 	mustCreateApiKey(s.T(), s.client, &service.APIKey{UserID: userOld.ID, Key: "sk-ul-2", Name: "ul2", Status: service.StatusDisabled})
 
 	resetAt := now.Add(10 * time.Minute)
-	accNormal := mustCreateAccount(s.T(), s.client, &service.Account{Name: "a-normal", Schedulable: true})
+	accModelRateLimited := mustCreateAccount(s.T(), s.client, &service.Account{
+		Name:        "a-model-rl",
+		Schedulable: true,
+		Extra: map[string]any{
+			"model_rate_limits": map[string]any{
+				"claude-3": map[string]any{
+					"rate_limited_at":     now.UTC().Format(time.RFC3339),
+					"rate_limit_reset_at": resetAt.UTC().Format(time.RFC3339),
+				},
+			},
+		},
+	})
 	mustCreateAccount(s.T(), s.client, &service.Account{Name: "a-error", Status: service.StatusError, Schedulable: true})
-	mustCreateAccount(s.T(), s.client, &service.Account{Name: "a-rl", RateLimitedAt: &now, RateLimitResetAt: &resetAt, Schedulable: true})
+	accRateLimited := mustCreateAccount(s.T(), s.client, &service.Account{Name: "a-rl", RateLimitedAt: &now, RateLimitResetAt: &resetAt, Schedulable: true})
 	mustCreateAccount(s.T(), s.client, &service.Account{Name: "a-ov", OverloadUntil: &resetAt, Schedulable: true})
 
 	d1, d2, d3 := 100, 200, 300
 	logToday := &service.UsageLog{
 		UserID:              userToday.ID,
 		APIKeyID:            apiKey1.ID,
-		AccountID:           accNormal.ID,
+		AccountID:           accModelRateLimited.ID,
 		Model:               "claude-3",
 		GroupID:             &group.ID,
 		InputTokens:         10,
@@ -700,7 +711,7 @@ func (s *UsageLogRepoSuite) TestDashboardStats_TodayTotalsAndPerformance() {
 	logOld := &service.UsageLog{
 		UserID:       userOld.ID,
 		APIKeyID:     apiKey1.ID,
-		AccountID:    accNormal.ID,
+		AccountID:    accModelRateLimited.ID,
 		Model:        "claude-3",
 		InputTokens:  5,
 		OutputTokens: 6,
@@ -715,7 +726,7 @@ func (s *UsageLogRepoSuite) TestDashboardStats_TodayTotalsAndPerformance() {
 	logPerf := &service.UsageLog{
 		UserID:       userToday.ID,
 		APIKeyID:     apiKey1.ID,
-		AccountID:    accNormal.ID,
+		AccountID:    accRateLimited.ID,
 		Model:        "claude-3",
 		InputTokens:  1,
 		OutputTokens: 2,
@@ -758,6 +769,8 @@ func (s *UsageLogRepoSuite) TestDashboardStats_TodayTotalsAndPerformance() {
 	s.Require().GreaterOrEqual(stats.TodayRequests, int64(1), "expected TodayRequests >= 1")
 	s.Require().GreaterOrEqual(stats.TodayCost, 0.0, "expected TodayCost >= 0")
 	s.Require().GreaterOrEqual(stats.TodayAccountCost, 0.0, "expected TodayAccountCost >= 0")
+	s.Require().Equal(baseStats.TodayActiveAccounts+2, stats.TodayActiveAccounts, "TodayActiveAccounts mismatch")
+	s.Require().Equal(baseStats.TodayRateLimitAccounts+2, stats.TodayRateLimitAccounts, "TodayRateLimitAccounts mismatch")
 
 	wantRpm, wantTpm, err := s.repo.getPerformanceStats(s.ctx, 0)
 	s.Require().NoError(err, "getPerformanceStats")

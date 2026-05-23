@@ -110,8 +110,10 @@ func (h *DashboardHandler) GetStats(c *gin.Context) {
 		"today_cache_creation_tokens": stats.TodayCacheCreationTokens,
 		"today_cache_read_tokens":     stats.TodayCacheReadTokens,
 		"today_tokens":                stats.TodayTokens,
-		"today_cost":                  stats.TodayCost,       // 今日标准计费
-		"today_actual_cost":           stats.TodayActualCost, // 今日实际扣除
+		"today_cost":                  stats.TodayCost,           // 今日标准计费
+		"today_actual_cost":           stats.TodayActualCost,     // 今日实际扣除
+		"today_active_accounts":       stats.TodayActiveAccounts, // 今日产生 Token 的不同账号数
+		"today_ratelimit_accounts":    stats.TodayRateLimitAccounts,
 
 		// 系统运行统计
 		"average_duration_ms": stats.AverageDurationMs,

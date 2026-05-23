@@ -110,6 +110,10 @@
                 <p class="text-xl font-bold text-gray-900 dark:text-white">
                   {{ formatTokens(stats.today_tokens) }}
                 </p>
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.dashboard.input') }}: {{ formatTokens(stats.today_input_tokens) }} /
+                  {{ t('admin.dashboard.output') }}: {{ formatTokens(stats.today_output_tokens) }}
+                </p>
                 <p class="text-xs">
                   <span
                     class="text-green-600 dark:text-green-400"
@@ -128,6 +132,14 @@
                     :title="t('admin.dashboard.standard')"
                     >${{ formatCost(stats.today_cost) }}</span
                   >
+                </p>
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  {{
+                    t('admin.dashboard.fromAccounts', {
+                      count: stats.today_active_accounts ?? 0,
+                      rateLimitCount: stats.today_ratelimit_accounts ?? 0
+                    })
+                  }}
                 </p>
               </div>
             </div>
