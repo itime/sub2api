@@ -1,0 +1,11 @@
+[program:sub2api]
+command=@INSTALL_BIN@
+directory=@ROOT_DIR@
+user=@RUN_USER@
+autostart=true
+autorestart=true
+environment=DATA_DIR="@DATA_DIR@",RUN_MODE="standard",TZ="Asia/Shanghai",HTTP_PROXY="http://127.0.0.1:6152",HTTPS_PROXY="http://127.0.0.1:6152",ALL_PROXY="http://127.0.0.1:6152",http_proxy="http://127.0.0.1:6152",https_proxy="http://127.0.0.1:6152",all_proxy="http://127.0.0.1:6152",NO_PROXY="127.0.0.1,localhost",no_proxy="127.0.0.1,localhost"
+redirect_stderr=false
+priority=12
+stdout_logfile=@LOG_DIR@/out.log
+stderr_logfile=@LOG_DIR@/err.log

@@ -122,7 +122,7 @@ scripts
 .code-review-state
 #openspec/
 code-reviews/
-AGENTS.md
+# AGENTS.md — project local deploy / agent notes (tracked)
 backend/cmd/server/server
 deploy/docker-compose.override.yml
 .gocache/
@@ -137,3 +137,4 @@ frontend/coverage/
 aicodex
 output/
 sub2api
+.deploy/
