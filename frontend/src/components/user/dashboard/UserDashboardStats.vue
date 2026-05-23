@@ -79,6 +79,14 @@
           <p class="text-xs font-medium text-gray-500 dark:text-gray-400">{{ t('dashboard.todayTokens') }}</p>
           <p class="text-xl font-bold text-gray-900 dark:text-white">{{ formatTokens(stats?.today_tokens || 0) }}</p>
           <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('dashboard.input') }}: {{ formatTokens(stats?.today_input_tokens || 0) }} / {{ t('dashboard.output') }}: {{ formatTokens(stats?.today_output_tokens || 0) }}</p>
+          <p v-if="systemTokenAccounts" class="text-xs text-gray-500 dark:text-gray-400">
+            {{
+              t('admin.dashboard.fromAccounts', {
+                count: systemTokenAccounts.active,
+                rateLimitCount: systemTokenAccounts.rateLimit
+              })
+            }}
+          </p>
         </div>
       </div>
     </div>
@@ -142,6 +150,8 @@ defineProps<{
   stats: UserStatsType
   balance: number
   isSimple: boolean
+  /** 管理员在用户仪表盘查看时展示的全局账号统计 */
+  systemTokenAccounts?: { active: number; rateLimit: number } | null
 }>()
 const { t } = useI18n()
 
