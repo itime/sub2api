@@ -1,5 +1,5 @@
 .PHONY: build build-backend build-frontend build-release build-datamanagementd \
-	deploy deploy-check test test-backend test-frontend test-frontend-critical \
+	deploy deploy-fast deploy-check test test-backend test-frontend test-frontend-critical \
 	test-datamanagementd secret-scan
 
 FRONTEND_CRITICAL_VITEST := \
@@ -28,9 +28,13 @@ build-frontend:
 build-release:
 	@./deploy.sh --build-only
 
-# 本地发布：构建 embed 二进制 + 安装到 /usr/local/bin/sub2api + supervisor 重启 + 健康检查
+# 本地发布（推荐）：始终重建前端 embed + 后端 + 安装 + 健康检查（一次到位）
 deploy:
-	@./deploy.sh
+	@FRONTEND_BUILD=1 DEPLOY_VERIFY_EMBED=1 ./deploy.sh
+
+# 仅后端改动时可选：前端按 git 指纹/mtime 判断是否需要重建（约快 20s）
+deploy-fast:
+	@FRONTEND_BUILD=auto DEPLOY_VERIFY_EMBED=1 ./deploy.sh
 
 # 对比 git / dist / 已安装二进制 / 健康检查
 deploy-check:

@@ -2,12 +2,13 @@
 # Local release: build embed binary + install to supervisor-managed /usr/local/bin/sub2api.
 #
 # Usage:
-#   ./deploy.sh              # full deploy (default FRONTEND_BUILD=auto)
+#   ./deploy.sh              # full deploy (default FRONTEND_BUILD=1, always rebuild UI)
 #   ./deploy.sh --build-only # build ./sub2api only, no sudo
 #   make deploy              # recommended entry point
 #
 # Environment:
-#   FRONTEND_BUILD=auto|0|1  — auto rebuild dist when frontend/src is newer (default: auto)
+#   FRONTEND_BUILD=1|auto|0  — full deploy defaults to 1 (always rebuild UI)
+#   DEPLOY_VERIFY_EMBED=1    — verify admin dashboard bundle after frontend build (default on full deploy)
 #   API_BASE                 — health check URL (default: http://127.0.0.1:18080)
 #   DATA_DIR                 — runtime data (default: ./data)
 #   INSTALL_BIN              — target binary (default: /usr/local/bin/sub2api)
@@ -57,13 +58,15 @@ Local deploy for Sub2API (supervisor + ${INSTALL_BIN})
   ./deploy.sh --help
 
 Environment:
-  FRONTEND_BUILD=auto|0|1     auto: rebuild dist when frontend/src changed (default)
+  FRONTEND_BUILD=1|auto|0     full deploy default: 1 (always rebuild embedded UI)
+  DEPLOY_VERIFY_EMBED=1       verify dashboard bundle exists in dist after frontend build
   API_BASE                    Health check base URL (default: ${API_BASE})
   DATA_DIR                    Runtime data directory (default: ${DATA_DIR})
 
 Makefile shortcuts:
-  make deploy                 Full local release
-  make build-release          Same as ./deploy.sh --build-only
+  make deploy                 Full release (frontend always rebuilt)
+  make deploy-fast            Skip frontend build when sources hash unchanged
+  make build-release          Build ./sub2api only (no sudo)
   make deploy-check           Compare git / dist / installed binary / health
 
 Note: 'make build' compiles backend/bin/server WITHOUT embed tag and does NOT
@@ -97,6 +100,18 @@ fi
 deploy_info "git $(deploy_git_short_sha) (dirty: $(deploy_git_dirty))"
 if [ "$(deploy_git_dirty)" = "yes" ] && [ "$BUILD_ONLY" = "0" ]; then
   deploy_info "warning: working tree has uncommitted changes — deployed binary may not match any commit"
+fi
+
+# Full deploy: always rebuild frontend + verify embed (one-shot stable release).
+if [ -z "${FRONTEND_BUILD:-}" ]; then
+  if [ "$BUILD_ONLY" = "1" ]; then
+    FRONTEND_BUILD=auto
+  else
+    FRONTEND_BUILD=1
+  fi
+fi
+if [ "$BUILD_ONLY" = "0" ] && [ -z "${DEPLOY_VERIFY_EMBED+x}" ]; then
+  export DEPLOY_VERIFY_EMBED=1
 fi
 
 deploy_ensure_frontend_dist
@@ -164,7 +179,9 @@ if deploy_health_check "$API_BASE" 15; then
   "install_bin": "$INSTALL_BIN",
   "binary_sha256": "$(deploy_binary_sha256 "$INSTALL_BIN")",
   "backup": "${BACKUP_PATH:-}",
-  "api_base": "$API_BASE"
+  "api_base": "$API_BASE",
+  "frontend_rebuilt": $([ "$FRONTEND_BUILD" = "1" ] && echo true || echo false),
+  "frontend_sources_hash": "$(deploy_frontend_sources_hash)"
 }
 EOF
   deploy_info "deploy complete"

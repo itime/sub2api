@@ -31,20 +31,65 @@ deploy_git_dirty() {
   fi
 }
 
-# Returns 0 when frontend dist should be rebuilt (missing, empty, or older than src).
+# Content hash of tracked frontend sources (mtime alone is unreliable).
+deploy_frontend_sources_hash() {
+  (
+    cd "$ROOT_DIR"
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      git ls-files frontend 2>/dev/null | LC_ALL=C sort | while IFS= read -r file; do
+        [ -f "$file" ] && shasum -a 256 "$file"
+      done
+    else
+      find frontend/src frontend/package.json frontend/pnpm-lock.yaml frontend/vite.config.ts \
+        frontend/index.html frontend/tsconfig.json frontend/tsconfig.app.json \
+        -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r file; do
+        shasum -a 256 "$file"
+      done
+    fi
+  ) | shasum -a 256 | awk '{print $1}'
+}
+
+deploy_last_frontend_sources_hash() {
+  local manifest="${ROOT_DIR}/.deploy/last-build.json"
+  if [ ! -f "$manifest" ] || ! command -v python3 >/dev/null 2>&1; then
+    echo ""
+    return 0
+  fi
+  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('frontend_sources_hash') or '')" "$manifest" 2>/dev/null || true
+}
+
+# Returns 0 when frontend dist should be rebuilt.
 deploy_frontend_is_stale() {
   local dist_index="${DIST_DIR}/index.html"
   if [ ! -f "$dist_index" ]; then
     return 0
   fi
-  if ! find "$FRONTEND_DIR/src" -type f -newer "$dist_index" -print -quit 2>/dev/null | grep -q .; then
-    return 1
+
+  local current_hash last_hash
+  current_hash="$(deploy_frontend_sources_hash)"
+  last_hash="$(deploy_last_frontend_sources_hash)"
+  if [ -n "$last_hash" ] && [ "$current_hash" != "$last_hash" ]; then
+    return 0
   fi
-  return 0
+
+  if find "$FRONTEND_DIR/src" -type f -newer "$dist_index" -print -quit 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  for config_file in \
+    "$FRONTEND_DIR/package.json" \
+    "$FRONTEND_DIR/pnpm-lock.yaml" \
+    "$FRONTEND_DIR/vite.config.ts" \
+    "$FRONTEND_DIR/index.html"; do
+    if [ -f "$config_file" ] && [ "$config_file" -nt "$dist_index" ]; then
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 deploy_resolve_frontend_build() {
-  local mode="${FRONTEND_BUILD:-auto}"
+  local mode="${1:-${FRONTEND_BUILD:-auto}}"
   case "$mode" in
     0|false|no)
       FRONTEND_BUILD=0
@@ -54,7 +99,7 @@ deploy_resolve_frontend_build() {
       ;;
     auto)
       if deploy_frontend_is_stale; then
-        deploy_info "frontend dist is missing or older than frontend/src — will rebuild (FRONTEND_BUILD=auto)"
+        deploy_info "frontend sources changed or dist missing — will rebuild (FRONTEND_BUILD=auto)"
         FRONTEND_BUILD=1
       else
         FRONTEND_BUILD=0
@@ -64,6 +109,19 @@ deploy_resolve_frontend_build() {
       deploy_die "invalid FRONTEND_BUILD=$mode (use 0, 1, or auto)"
       ;;
   esac
+}
+
+# Sanity-check that the admin dashboard bundle was embedded (catches stale dist).
+deploy_verify_embedded_frontend() {
+  local dashboard_chunk
+  dashboard_chunk="$(find "${DIST_DIR}/assets" -name 'DashboardView-*.js' -print 2>/dev/null | head -1)"
+  if [ -z "$dashboard_chunk" ]; then
+    deploy_die "embed verify failed: no DashboardView chunk under ${DIST_DIR}/assets"
+  fi
+  if ! grep -q 'today_active_accounts' "$dashboard_chunk" 2>/dev/null; then
+    deploy_die "embed verify failed: dashboard bundle missing today_active_accounts (dist is stale — use: make deploy)"
+  fi
+  deploy_info "embed verify ok ($(basename "$dashboard_chunk"))"
 }
 
 deploy_build_frontend() {
@@ -77,13 +135,19 @@ deploy_build_frontend() {
 }
 
 deploy_ensure_frontend_dist() {
-  deploy_resolve_frontend_build
+  deploy_resolve_frontend_build "${FRONTEND_BUILD:-auto}"
   if [ "$FRONTEND_BUILD" = "1" ]; then
     deploy_build_frontend
+    if [ "${DEPLOY_VERIFY_EMBED:-1}" = "1" ]; then
+      deploy_verify_embedded_frontend
+    fi
   elif [ ! -d "$DIST_DIR" ] || [ ! -f "${DIST_DIR}/index.html" ]; then
-    deploy_die "embedded frontend dist not found at $DIST_DIR — run: FRONTEND_BUILD=1 make deploy"
+    deploy_die "embedded frontend dist not found at $DIST_DIR — run: make deploy"
   else
     deploy_info "using embedded frontend dist at $DIST_DIR"
+    if [ "${DEPLOY_VERIFY_EMBED:-0}" = "1" ]; then
+      deploy_verify_embedded_frontend
+    fi
   fi
 }
 
@@ -113,7 +177,8 @@ deploy_write_manifest() {
   "binary": "$bin",
   "binary_sha256": "$(deploy_binary_sha256 "$bin")",
   "frontend_dist": "$DIST_DIR",
-  "frontend_rebuilt": $([ "$FRONTEND_BUILD" = "1" ] && echo true || echo false)
+  "frontend_rebuilt": $([ "$FRONTEND_BUILD" = "1" ] && echo true || echo false),
+  "frontend_sources_hash": "$(deploy_frontend_sources_hash)"
 }
 EOF
   deploy_info "wrote ${manifest_dir}/last-build.json"

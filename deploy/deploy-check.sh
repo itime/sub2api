@@ -52,13 +52,33 @@ echo ""
 echo "--- frontend embed ---"
 if [ -f "${DIST_DIR}/index.html" ]; then
   echo "dist: $DIST_DIR (index.html mtime: $(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "${DIST_DIR}/index.html" 2>/dev/null || stat -c '%y' "${DIST_DIR}/index.html"))"
+  current_hash="$(deploy_frontend_sources_hash)"
+  last_hash="$(deploy_last_frontend_sources_hash)"
+  echo "  sources_hash: ${current_hash}"
+  if [ -n "$last_hash" ]; then
+    echo "  last_build_hash: ${last_hash}"
+  fi
   if deploy_frontend_is_stale; then
-    echo "status: STALE — frontend/src is newer than dist (run make deploy)"
+    echo "status: STALE — frontend sources differ from last build (run make deploy)"
   else
-    echo "status: ok"
+    echo "status: ok (fingerprint)"
+  fi
+  dashboard_chunk="$(find "${DIST_DIR}/assets" -name 'DashboardView-*.js' -print 2>/dev/null | head -1)"
+  if [ -n "$dashboard_chunk" ] && grep -q 'today_active_accounts' "$dashboard_chunk" 2>/dev/null; then
+    echo "embed: ok (admin dashboard includes account stats)"
+  else
+    echo "embed: MISSING today_active_accounts in dashboard bundle — run make deploy"
   fi
 else
   echo "dist: MISSING at $DIST_DIR"
+fi
+
+installed_sha="$(deploy_binary_sha256 "$INSTALL_BIN" 2>/dev/null || true)"
+workspace_sha=""
+[ -f "$BUILD_BIN" ] && workspace_sha="$(deploy_binary_sha256 "$BUILD_BIN")"
+if [ -n "$installed_sha" ] && [ -n "$workspace_sha" ] && [ "$installed_sha" != "$workspace_sha" ]; then
+  echo ""
+  echo "WARNING: installed binary != workspace $BUILD_BIN — run make deploy"
 fi
 
 echo ""
@@ -82,5 +102,7 @@ if pgrep -x sub2api >/dev/null 2>&1; then
 fi
 
 echo ""
+echo ""
 echo "To release local changes to :18080: make deploy"
-echo "To build only (no sudo):       make build-release"
+echo "Backend-only quick path:            make deploy-fast"
+echo "Build only (no sudo):               make build-release"
