@@ -96,6 +96,11 @@ export default defineConfig(({ mode }) => {
               return 'vendor-i18n'
             }
 
+            // Stripe 仅支付页动态加载，勿打进通用 vendor-misc
+            if (id.includes('/@stripe/')) {
+              return 'vendor-stripe'
+            }
+
             // 其他小型第三方库合并
             return 'vendor-misc'
           }

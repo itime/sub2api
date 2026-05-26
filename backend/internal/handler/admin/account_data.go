@@ -57,6 +57,12 @@ type DataAccount struct {
 	RateMultiplier     *float64       `json:"rate_multiplier,omitempty"`
 	ExpiresAt          *int64         `json:"expires_at,omitempty"`
 	AutoPauseOnExpired *bool          `json:"auto_pause_on_expired,omitempty"`
+	// CreatedAt 用于在导入时显式指定账号的创建时间。
+	// - 当来源端（例如 openai-free）已有真实创建时间时，应通过该字段透传，
+	//   避免导入后的 created_at 被覆盖为导入瞬间的时间。
+	// - 同时支持秒级 Unix 时间戳（int64）与 ISO 8601 字符串两种形式。
+	// - 字段缺失或解析失败时，保持原行为（由 ent 默认填充当前时间）。
+	CreatedAt any `json:"created_at,omitempty"`
 }
 
 type DataImportRequest struct {
@@ -161,6 +167,7 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 			RateMultiplier:     acc.RateMultiplier,
 			ExpiresAt:          expiresAt,
 			AutoPauseOnExpired: &acc.AutoPauseOnExpired,
+			CreatedAt:          acc.CreatedAt.UTC().Format(time.RFC3339),
 		})
 	}
 
@@ -335,6 +342,7 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 			ExpiresAt:            item.ExpiresAt,
 			AutoPauseOnExpired:   item.AutoPauseOnExpired,
 			SkipDefaultGroupBind: skipDefaultGroupBind,
+			CreatedAt:            parseDataAccountCreatedAt(item.CreatedAt),
 		}
 
 		created, err := h.adminService.CreateAccount(ctx, accountInput)
@@ -693,4 +701,179 @@ func normalizeProxyStatus(status string) string {
 	default:
 		return normalized
 	}
+}
+
+// parseDataAccountCreatedAt 兼容多种 created_at 形态：
+//   - int64/float64：按 Unix 秒解析
+//   - 字符串："1700000000"（秒）/ ISO 8601（time.RFC3339）/ 部分常见日期格式
+//
+// 仅在导入时使用，解析失败返回 nil 让 ent 默认填充当前时间。
+func parseDataAccountCreatedAt(value any) *time.Time {
+	if value == nil {
+		return nil
+	}
+	switch v := value.(type) {
+	case float64:
+		if v <= 0 {
+			return nil
+		}
+		// 秒或毫秒：>= 10^12 视为毫秒
+		var t time.Time
+		if v >= 1e12 {
+			t = time.Unix(0, int64(v)*int64(time.Millisecond))
+		} else {
+			t = time.Unix(int64(v), 0)
+		}
+		return &t
+	case int64:
+		if v <= 0 {
+			return nil
+		}
+		var t time.Time
+		if v >= 1e12 {
+			t = time.Unix(0, v*int64(time.Millisecond))
+		} else {
+			t = time.Unix(v, 0)
+		}
+		return &t
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return nil
+		}
+		// 整数字符串
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return parseDataAccountCreatedAt(n)
+		}
+		layouts := []string{
+			time.RFC3339Nano,
+			time.RFC3339,
+			"2006-01-02T15:04:05Z07:00",
+			"2006-01-02T15:04:05",
+			"2006-01-02 15:04:05",
+			"2006-01-02",
+		}
+		for _, layout := range layouts {
+			if t, err := time.Parse(layout, s); err == nil {
+				return &t
+			}
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
+// ----------------------------------------------------------------------------
+// 回填账号 created_at（按 email 匹配）
+// ----------------------------------------------------------------------------
+
+// BackfillCreatedAtItem 描述单条回填项。
+//   - email：用于匹配账号；与 credentials.email、extra.email、name 进行不区分大小写的比对。
+//   - created_at：兼容秒级 Unix 时间戳与 ISO 8601 字符串。
+type BackfillCreatedAtItem struct {
+	Email     string `json:"email"`
+	CreatedAt any    `json:"created_at"`
+}
+
+// BackfillCreatedAtRequest 是回填接口的请求体。
+type BackfillCreatedAtRequest struct {
+	Items []BackfillCreatedAtItem `json:"items"`
+	// OverrideExisting 为 true 时强制覆盖已有的 created_at；
+	// 默认仅在原值缺失或与 updated_at 在 2 秒内一致（视为导入瞬间填的占位时间）时才回填。
+	OverrideExisting bool `json:"override_existing"`
+}
+
+// BackfillCreatedAtResultItem 描述单条回填结果。
+type BackfillCreatedAtResultItem struct {
+	Email     string `json:"email"`
+	AccountID int64  `json:"account_id,omitempty"`
+	Updated   bool   `json:"updated"`
+	Skipped   bool   `json:"skipped,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// BackfillCreatedAtResult 是回填接口的响应体。
+type BackfillCreatedAtResult struct {
+	Total   int                           `json:"total"`
+	Updated int                           `json:"updated"`
+	Skipped int                           `json:"skipped"`
+	Failed  int                           `json:"failed"`
+	Items   []BackfillCreatedAtResultItem `json:"items"`
+}
+
+// BackfillCreatedAt 提供按 email 批量回填账号 created_at 的能力。
+// 用于已有数据补齐源端真实创建时间，避免在管理界面看到错误的导入时间。
+func (h *AccountHandler) BackfillCreatedAt(c *gin.Context) {
+	var req BackfillCreatedAtRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if len(req.Items) == 0 {
+		response.BadRequest(c, "items is required")
+		return
+	}
+	if len(req.Items) > 5000 {
+		response.BadRequest(c, "items size exceeds limit (5000)")
+		return
+	}
+
+	ctx := c.Request.Context()
+	result := h.backfillCreatedAt(ctx, req)
+	response.Success(c, result)
+}
+
+func (h *AccountHandler) backfillCreatedAt(ctx context.Context, req BackfillCreatedAtRequest) BackfillCreatedAtResult {
+	out := BackfillCreatedAtResult{Total: len(req.Items), Items: make([]BackfillCreatedAtResultItem, 0, len(req.Items))}
+
+	updater, ok := h.adminService.(interface {
+		BackfillAccountCreatedAtByEmail(ctx context.Context, email string, createdAt time.Time, overrideExisting bool) (int64, bool, string, error)
+	})
+	if !ok {
+		out.Failed = len(req.Items)
+		for _, item := range req.Items {
+			out.Items = append(out.Items, BackfillCreatedAtResultItem{
+				Email:  strings.TrimSpace(item.Email),
+				Reason: "backfill not supported by current admin service",
+			})
+		}
+		return out
+	}
+
+	for _, item := range req.Items {
+		email := strings.TrimSpace(item.Email)
+		entry := BackfillCreatedAtResultItem{Email: email}
+		if email == "" {
+			entry.Reason = "email is required"
+			out.Failed++
+			out.Items = append(out.Items, entry)
+			continue
+		}
+		ts := parseDataAccountCreatedAt(item.CreatedAt)
+		if ts == nil {
+			entry.Reason = "invalid created_at"
+			out.Failed++
+			out.Items = append(out.Items, entry)
+			continue
+		}
+		id, updated, reason, err := updater.BackfillAccountCreatedAtByEmail(ctx, email, *ts, req.OverrideExisting)
+		entry.AccountID = id
+		if err != nil {
+			entry.Reason = err.Error()
+			out.Failed++
+			out.Items = append(out.Items, entry)
+			continue
+		}
+		if updated {
+			entry.Updated = true
+			out.Updated++
+		} else {
+			entry.Skipped = true
+			entry.Reason = reason
+			out.Skipped++
+		}
+		out.Items = append(out.Items, entry)
+	}
+	return out
 }

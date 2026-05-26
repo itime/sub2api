@@ -10,6 +10,11 @@
       <slot name="filters" />
     </div>
 
+    <!-- 固定区域：表格外的工具栏（如状态 Tab） -->
+    <div v-if="$slots.toolbar" class="layout-section-fixed">
+      <slot name="toolbar" />
+    </div>
+
     <!-- 滚动区域：表格 -->
     <div class="layout-section-scrollable">
       <div class="card table-scroll-container">

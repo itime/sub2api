@@ -148,6 +148,58 @@ describe('API Client', () => {
   // --- 401 Token 刷新 ---
 
   describe('401 Token 刷新', () => {
+    it('refresh 因网络失败时不应清除 localStorage', async () => {
+      localStorage.setItem('auth_token', 'expired-token')
+      localStorage.setItem('refresh_token', 'valid-refresh-token')
+
+      const originalLocation = window.location
+      Object.defineProperty(window, 'location', {
+        value: { ...originalLocation, pathname: '/dashboard', href: '/dashboard' },
+        writable: true
+      })
+
+      let call = 0
+      const adapter = vi.fn().mockImplementation((config) => {
+        call += 1
+        if (String(config.url).includes('/auth/refresh')) {
+          return Promise.reject({
+            code: 'ERR_NETWORK',
+            message: 'Network Error',
+            config
+          })
+        }
+        return Promise.reject({
+          response: {
+            status: 401,
+            data: { code: 'TOKEN_EXPIRED', message: 'Token expired' }
+          },
+          config: {
+            ...config,
+            url: '/test',
+            headers: { Authorization: 'Bearer expired-token' }
+          },
+          code: 'ERR_BAD_REQUEST'
+        })
+      })
+      apiClient.defaults.adapter = adapter
+
+      await expect(apiClient.get('/test')).rejects.toEqual(
+        expect.objectContaining({
+          status: 0,
+          code: 'NETWORK_ERROR'
+        })
+      )
+
+      expect(localStorage.getItem('auth_token')).toBe('expired-token')
+      expect(localStorage.getItem('refresh_token')).toBe('valid-refresh-token')
+      expect(window.location.href).toBe('/dashboard')
+
+      Object.defineProperty(window, 'location', {
+        value: originalLocation,
+        writable: true
+      })
+    })
+
     it('无 refresh_token 时 401 清除 localStorage', async () => {
       localStorage.setItem('auth_token', 'expired-token')
       // 不设置 refresh_token

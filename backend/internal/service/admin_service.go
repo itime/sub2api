@@ -67,6 +67,7 @@ type AdminService interface {
 
 	// Account management
 	ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string) ([]Account, int64, error)
+	CountAccountStatusSummary(ctx context.Context, platform, accountType, search string, groupID int64, privacyMode string) (map[string]int64, error)
 	GetAccount(ctx context.Context, id int64) (*Account, error)
 	GetAccountsByIDs(ctx context.Context, ids []int64) ([]*Account, error)
 	CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error)
@@ -86,6 +87,12 @@ type AdminService interface {
 	SetAccountSchedulable(ctx context.Context, id int64, schedulable bool) (*Account, error)
 	BulkUpdateAccounts(ctx context.Context, input *BulkUpdateAccountsInput) (*BulkUpdateAccountsResult, error)
 	CheckMixedChannelRisk(ctx context.Context, currentAccountID int64, currentAccountPlatform string, groupIDs []int64) error
+	// BackfillAccountCreatedAtByEmail 按 email 匹配账号并回填 created_at，
+	// 主要用于历史数据补齐导入时丢失的真实创建时间。
+	// - 若账号不存在，返回 (0, false, "not_found", nil)
+	// - 若 overrideExisting=false 且原 created_at 已是有效值（与 updated_at 不一致或两者间隔 >2s），跳过
+	// - 成功则同时刷新 updated_at 为当前时间，避免触碰其他业务字段
+	BackfillAccountCreatedAtByEmail(ctx context.Context, email string, createdAt time.Time, overrideExisting bool) (int64, bool, string, error)
 
 	// Proxy management
 	ListProxies(ctx context.Context, page, pageSize int, protocol, status, search string, sortBy, sortOrder string) ([]Proxy, int64, error)
@@ -272,6 +279,10 @@ type CreateAccountInput struct {
 	GroupIDs           []int64
 	ExpiresAt          *int64
 	AutoPauseOnExpired *bool
+	// CreatedAt 用于显式指定创建时间。仅在数据导入等少数场景下使用：
+	// - nil（默认）：由 ent 默认填充当前时间
+	// - 非 nil：覆盖默认值，保留来源端的真实创建时间
+	CreatedAt *time.Time
 	// SkipDefaultGroupBind prevents auto-binding to platform default group when GroupIDs is empty.
 	SkipDefaultGroupBind bool
 	// SkipMixedChannelCheck skips the mixed channel risk check when binding groups.
@@ -2300,6 +2311,10 @@ func (s *adminServiceImpl) ListAccounts(ctx context.Context, page, pageSize int,
 	return accounts, result.Total, nil
 }
 
+func (s *adminServiceImpl) CountAccountStatusSummary(ctx context.Context, platform, accountType, search string, groupID int64, privacyMode string) (map[string]int64, error) {
+	return s.accountRepo.CountStatusSummary(ctx, platform, accountType, search, groupID, privacyMode)
+}
+
 func (s *adminServiceImpl) GetAccount(ctx context.Context, id int64) (*Account, error) {
 	return s.accountRepo.GetByID(ctx, id)
 }
@@ -2357,6 +2372,10 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		Priority:    input.Priority,
 		Status:      StatusActive,
 		Schedulable: true,
+	}
+	// 显式指定 created_at 时透传到 repo 层（用于数据导入等场景）
+	if input.CreatedAt != nil && !input.CreatedAt.IsZero() {
+		account.CreatedAt = *input.CreatedAt
 	}
 	// 预计算固定时间重置的下次重置时间
 	if account.Extra != nil {
@@ -2755,6 +2774,48 @@ func (s *adminServiceImpl) DeleteAccount(ctx context.Context, id int64) error {
 		return err
 	}
 	return nil
+}
+
+// BackfillAccountCreatedAtByEmail 见 AdminService 接口注释。
+//
+// 跳过策略：
+//   - overrideExisting=true：直接覆盖
+//   - overrideExisting=false：仅当满足以下任一条件时回填，否则跳过避免破坏现有审计信息：
+//     1) 现有 created_at 为空
+//     2) 现有 created_at 与 updated_at 相差 <2s（视为 ent 自动填充的导入时刻）
+//     3) 来源 created_at 比现有早超过 60s（典型的"导入时间晚于真实注册时间"场景）
+func (s *adminServiceImpl) BackfillAccountCreatedAtByEmail(ctx context.Context, email string, createdAt time.Time, overrideExisting bool) (int64, bool, string, error) {
+	id, err := s.accountRepo.FindIDByEmail(ctx, email)
+	if err != nil {
+		return 0, false, "", err
+	}
+	if id == 0 {
+		return 0, false, "not_found", nil
+	}
+	if !overrideExisting {
+		existingCreated, existingUpdated, err := s.accountRepo.GetCreatedAndUpdatedAt(ctx, id)
+		if err != nil {
+			return id, false, "", err
+		}
+		switch {
+		case existingCreated.IsZero():
+			// fall through 回填
+		case existingUpdated.Sub(existingCreated) <= 2*time.Second:
+			// fall through 回填（导入瞬间，没被业务动过）
+		case existingCreated.Sub(createdAt) > 60*time.Second:
+			// fall through 回填（来源比现有早，明显是真实注册时间）
+		default:
+			return id, false, "existing_created_at_in_use", nil
+		}
+		// 同源回填：源时间和现有 created_at 已经相等（秒级），跳过避免无谓写
+		if existingCreated.Truncate(time.Second).Equal(createdAt.Truncate(time.Second)) {
+			return id, false, "already_up_to_date", nil
+		}
+	}
+	if err := s.accountRepo.SetCreatedAt(ctx, id, createdAt); err != nil {
+		return id, false, "", err
+	}
+	return id, true, "", nil
 }
 
 func (s *adminServiceImpl) RefreshAccountCredentials(ctx context.Context, id int64) (*Account, error) {

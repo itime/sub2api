@@ -140,6 +140,15 @@
           </button>
         </div>
       </template>
+      <template #toolbar>
+        <AccountStatusTabs
+          :model-value="(params.status as AccountStatusTabValue) || ''"
+          :counts="statusCounts"
+          :loading="statusCountsLoading"
+          @update:model-value="(value) => { params.status = value }"
+          @change="handleStatusTabChange"
+        />
+      </template>
       <template #table>
         <AccountBulkActionsBar
           :selected-ids="selIds"
@@ -154,6 +163,7 @@
         />
         <div ref="accountTableRef" class="flex min-h-0 flex-1 flex-col overflow-hidden">
         <DataTable
+          :key="`accounts-${params.status || 'all'}`"
           ref="dataTableRef"
           :columns="cols"
           :data="accounts"
@@ -161,8 +171,8 @@
           row-key="id"
           :server-side-sort="true"
           @sort="handleSort"
-          default-sort-key="name"
-          default-sort-order="asc"
+          :default-sort-key="params.status === 'rate_limited' ? 'rate_limit_reset_at' : 'name'"
+          :default-sort-order="params.status === 'rate_limited' ? 'asc' : 'asc'"
           :sort-storage-key="ACCOUNT_SORT_STORAGE_KEY"
           :estimate-row-height="72"
           :overscan="5"
@@ -240,12 +250,27 @@
           <template #cell-groups="{ row }">
             <AccountGroupsCell :groups="row.groups" :max-display="4" />
           </template>
+          <template #cell-usage_5h="{ row }">
+            <AccountUsageCell
+              :account="row"
+              window="5h"
+              :manual-refresh-token="usageManualRefreshToken"
+            />
+          </template>
+          <template #cell-usage_7d="{ row }">
+            <AccountUsageCell
+              :account="row"
+              window="7d"
+              :manual-refresh-token="usageManualRefreshToken"
+            />
+          </template>
           <template #cell-usage="{ row }">
             <AccountUsageCell
               :account="row"
               :today-stats="todayStatsByAccountId[String(row.id)] ?? null"
               :today-stats-loading="todayStatsLoading"
               :manual-refresh-token="usageManualRefreshToken"
+              hide-standard-windows
             />
           </template>
           <template #cell-proxy="{ row }">
@@ -286,6 +311,9 @@
                 </span>
               </div>
             </div>
+          </template>
+          <template #cell-created_at="{ value }">
+            <span class="text-sm text-gray-500 dark:text-dark-400" :title="value || ''">{{ formatCreatedAt(value) }}</span>
           </template>
           <template #cell-actions="{ row }">
             <div class="flex items-center gap-1">
@@ -359,6 +387,7 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import { CreateAccountModal, EditAccountModal, BulkEditAccountModal, SyncFromCrsModal, TempUnschedStatusModal } from '@/components/account'
 import AccountTableActions from '@/components/admin/account/AccountTableActions.vue'
 import AccountTableFilters from '@/components/admin/account/AccountTableFilters.vue'
+import AccountStatusTabs, { type AccountStatusTabValue } from '@/components/admin/account/AccountStatusTabs.vue'
 import AccountBulkActionsBar from '@/components/admin/account/AccountBulkActionsBar.vue'
 import AccountActionMenu from '@/components/admin/account/AccountActionMenu.vue'
 import ImportDataModal from '@/components/admin/account/ImportDataModal.vue'
@@ -477,7 +506,11 @@ const ACCOUNT_SORTABLE_KEYS = new Set([
   'rate_multiplier',
   'last_used_at',
   'expires_at',
-  'rate_limit_reset_at'
+  'created_at',
+  'rate_limit_reset_at',
+  'usage',
+  'usage_5h',
+  'usage_7d'
 ])
 const loadInitialAccountSortState = (): AccountSortState => {
   const fallback: AccountSortState = { sort_by: 'name', sort_order: 'asc' }
@@ -485,7 +518,8 @@ const loadInitialAccountSortState = (): AccountSortState => {
     const raw = localStorage.getItem(ACCOUNT_SORT_STORAGE_KEY)
     if (!raw) return fallback
     const parsed = JSON.parse(raw) as { key?: string; order?: string }
-    const key = typeof parsed.key === 'string' ? parsed.key : ''
+    let key = typeof parsed.key === 'string' ? parsed.key : ''
+    if (key === 'usage') key = 'usage_7d'
     if (!ACCOUNT_SORTABLE_KEYS.has(key)) return fallback
     return {
       sort_by: key,
@@ -496,6 +530,29 @@ const loadInitialAccountSortState = (): AccountSortState => {
   }
 }
 const sortState = reactive<AccountSortState>(loadInitialAccountSortState())
+
+const apiSortBy = (key: string, status = '') => {
+  if (key === 'usage' || key === 'usage_7d') return 'usage_7d'
+  if (key === 'usage_5h') return 'usage_5h'
+  // 限流 Tab：「恢复时间」列按 7d 窗口恢复时间排序（由早到晚）
+  if (key === 'rate_limit_reset_at' && status === 'rate_limited') {
+    return 'usage_7d_reset_at'
+  }
+  return key
+}
+
+const RATE_LIMITED_DEFAULT_SORT: AccountSortState = {
+  sort_by: 'rate_limit_reset_at',
+  sort_order: 'asc'
+}
+
+const persistAccountSortState = (key: string, order: AccountSortOrder) => {
+  try {
+    localStorage.setItem(ACCOUNT_SORT_STORAGE_KEY, JSON.stringify({ key, order }))
+  } catch (e) {
+    console.error('Failed to persist account sort state:', e)
+  }
+}
 
 // Auto refresh settings
 const showAutoRefreshDropdown = ref(false)
@@ -530,7 +587,12 @@ const refreshTodayStatsBatch = async () => {
   // - today_stats column shows dedicated today's metrics.
   // - usage column also embeds today's stats for Key/Bedrock rows.
   // So we only skip fetching when BOTH columns are hidden.
-  if (hiddenColumns.has('today_stats') && hiddenColumns.has('usage')) {
+  if (
+    hiddenColumns.has('today_stats') &&
+    hiddenColumns.has('usage') &&
+    hiddenColumns.has('usage_5h') &&
+    hiddenColumns.has('usage_7d')
+  ) {
     todayStatsLoading.value = false
     todayStatsError.value = null
     return
@@ -668,7 +730,10 @@ const toggleColumn = (key: string) => {
     hiddenColumns.add(key)
   }
   saveColumnsToStorage()
-  if ((key === 'today_stats' || key === 'usage') && wasHidden) {
+  if (
+    (key === 'today_stats' || key === 'usage' || key === 'usage_5h' || key === 'usage_7d') &&
+    wasHidden
+  ) {
     refreshTodayStatsBatch().catch((error) => {
       console.error('Failed to load account today stats after showing column:', error)
     })
@@ -696,7 +761,7 @@ const {
     privacy_mode: '',
     group: '',
     search: '',
-    sort_by: sortState.sort_by,
+    sort_by: apiSortBy(sortState.sort_by, ''),
     sort_order: sortState.sort_order
   }
 })
@@ -737,6 +802,40 @@ const resetAutoRefreshCache = () => {
 }
 
 const isFirstLoad = ref(true)
+const statusCounts = ref<import('@/api/admin/accounts').AccountStatusCounts | null>(null)
+const statusCountsLoading = ref(false)
+
+const loadStatusCounts = async () => {
+  statusCountsLoading.value = true
+  try {
+    const filters = buildAccountQueryFilters()
+    statusCounts.value = await adminAPI.accounts.getStatusCounts({
+      platform: filters.platform || undefined,
+      type: filters.type || undefined,
+      group: filters.group || undefined,
+      privacy_mode: filters.privacy_mode || undefined,
+      search: filters.search || undefined
+    })
+  } catch (error) {
+    console.error('Failed to load account status counts:', error)
+  } finally {
+    statusCountsLoading.value = false
+  }
+}
+
+const handleStatusTabChange = () => {
+  hasPendingListSync.value = false
+  resetAutoRefreshCache()
+  pendingTodayStatsRefresh.value = true
+  if (pagination.page !== 1) {
+    pagination.page = 1
+  }
+  if (params.status === 'rate_limited') {
+    applyRateLimitedDefaultSort()
+    return
+  }
+  baseDebouncedReload()
+}
 
 const load = async () => {
   const requestParams = params as any
@@ -760,6 +859,7 @@ const reload = async () => {
   pendingTodayStatsRefresh.value = false
   await baseReload()
   await refreshTodayStatsBatch()
+  await loadStatusCounts()
 }
 
 const debouncedReload = () => {
@@ -767,6 +867,7 @@ const debouncedReload = () => {
   resetAutoRefreshCache()
   pendingTodayStatsRefresh.value = true
   baseDebouncedReload()
+  void loadStatusCounts()
 }
 
 const handlePageChange = (page: number) => {
@@ -784,16 +885,25 @@ const handlePageSizeChange = (size: number) => {
 }
 
 const handleSort = (key: string, order: AccountSortOrder) => {
+  // sortState 与 DataTable 内部 sortKey 一致，确保表头排序箭头能正确显示
   sortState.sort_by = key
   sortState.sort_order = order
   const requestParams = params as any
-  requestParams.sort_by = key
+  requestParams.sort_by = apiSortBy(key, params.status)
   requestParams.sort_order = order
   pagination.page = 1
   hasPendingListSync.value = false
   resetAutoRefreshCache()
   pendingTodayStatsRefresh.value = true
   load()
+}
+
+const applyRateLimitedDefaultSort = () => {
+  persistAccountSortState(
+    RATE_LIMITED_DEFAULT_SORT.sort_by,
+    RATE_LIMITED_DEFAULT_SORT.sort_order
+  )
+  handleSort(RATE_LIMITED_DEFAULT_SORT.sort_by, RATE_LIMITED_DEFAULT_SORT.sort_order)
 }
 
 watch(loading, (isLoading, wasLoading) => {
@@ -1051,12 +1161,15 @@ const allColumns = computed(() => {
     c.push({ key: 'groups', label: t('admin.accounts.columns.groups'), sortable: false })
   }
   c.push(
+    { key: 'usage_5h', label: t('admin.accounts.columns.usage5h'), sortable: true },
+    { key: 'usage_7d', label: t('admin.accounts.columns.usage7d'), sortable: true },
     { key: 'usage', label: t('admin.accounts.columns.usageWindows'), sortable: false },
     { key: 'proxy', label: t('admin.accounts.columns.proxy'), sortable: false },
     { key: 'priority', label: t('admin.accounts.columns.priority'), sortable: true },
     { key: 'rate_multiplier', label: t('admin.accounts.columns.billingRateMultiplier'), sortable: true },
     { key: 'last_used_at', label: t('admin.accounts.columns.lastUsed'), sortable: true },
     { key: 'expires_at', label: t('admin.accounts.columns.expiresAt'), sortable: true },
+    { key: 'created_at', label: t('admin.accounts.columns.createdAt'), sortable: true },
     { key: 'notes', label: t('admin.accounts.columns.notes'), sortable: false },
     { key: 'actions', label: t('admin.accounts.columns.actions'), sortable: false }
   )
@@ -1327,7 +1440,7 @@ const buildAccountQueryFilters = () => ({
   group: params.group || '',
   privacy_mode: params.privacy_mode || '',
   search: params.search || '',
-  sort_by: sortState.sort_by,
+  sort_by: apiSortBy(sortState.sort_by, params.status),
   sort_order: sortState.sort_order
 })
 const accountMatchesCurrentFilters = (account: Account) => {
@@ -1559,6 +1672,23 @@ const formatExpiresAt = (value: number | null) => {
     'sv-SE'
   )
 }
+const formatCreatedAt = (value: string | null | undefined) => {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '-'
+  return formatDateTime(
+    date,
+    {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    },
+    'sv-SE'
+  )
+}
 const isExpired = (value: number | null) => {
   if (!value) return false
   return value * 1000 <= Date.now()
@@ -1582,6 +1712,7 @@ const handleClickOutside = (event: MouseEvent) => {
 
 onMounted(async () => {
   load()
+  void loadStatusCounts()
   try {
     const [p, g] = await Promise.all([adminAPI.proxies.getAll(), adminAPI.groups.getAll()])
     proxies.value = p

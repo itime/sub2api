@@ -1,5 +1,27 @@
 <template>
-  <div ref="rootRef" v-if="showUsageWindows">
+  <!-- Dedicated 5h / 7d list columns -->
+  <div v-if="window" ref="rootRef">
+    <div v-if="windowCellLoading" class="flex items-center gap-1">
+      <div class="h-3 w-[32px] animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+      <div class="h-1.5 w-8 animate-pulse rounded-full bg-gray-200 dark:bg-gray-700"></div>
+      <div class="h-3 w-[32px] animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+    </div>
+    <div v-else-if="error" class="text-xs text-red-500">
+      {{ error }}
+    </div>
+    <UsageProgressBar
+      v-else-if="windowProgress"
+      :label="window"
+      :utilization="windowProgress.utilization"
+      :resets-at="windowProgress.resetsAt"
+      :window-stats="windowProgress.windowStats"
+      :show-now-when-idle="account.platform === 'openai' && account.type === 'oauth'"
+      :color="window === '5h' ? 'indigo' : 'emerald'"
+    />
+    <div v-else class="text-xs text-gray-400">-</div>
+  </div>
+
+  <div ref="rootRef" v-else-if="showUsageWindows">
     <!-- Anthropic OAuth and Setup Token accounts: fetch real usage data -->
     <template
       v-if="
@@ -42,7 +64,7 @@
         </div>
         <!-- 5h Window -->
         <UsageProgressBar
-          v-if="usageInfo.five_hour"
+          v-if="!hideStandardWindows && usageInfo.five_hour"
           label="5h"
           :utilization="usageInfo.five_hour.utilization"
           :resets-at="usageInfo.five_hour.resets_at"
@@ -52,7 +74,7 @@
 
         <!-- 7d Window (OAuth only) -->
         <UsageProgressBar
-          v-if="usageInfo.seven_day"
+          v-if="!hideStandardWindows && usageInfo.seven_day"
           label="7d"
           :utilization="usageInfo.seven_day.utilization"
           :resets-at="usageInfo.seven_day.resets_at"
@@ -109,7 +131,7 @@
     <template v-else-if="account.platform === 'openai' && account.type === 'oauth'">
       <div v-if="hasOpenAIUsageFallback" class="space-y-1">
         <UsageProgressBar
-          v-if="usageInfo?.five_hour"
+          v-if="!hideStandardWindows && usageInfo?.five_hour"
           label="5h"
           :utilization="usageInfo.five_hour.utilization"
           :resets-at="usageInfo.five_hour.resets_at"
@@ -118,7 +140,7 @@
           color="indigo"
         />
         <UsageProgressBar
-          v-if="usageInfo?.seven_day"
+          v-if="!hideStandardWindows && usageInfo?.seven_day"
           label="7d"
           :utilization="usageInfo.seven_day.utilization"
           :resets-at="usageInfo.seven_day.resets_at"
@@ -450,7 +472,7 @@
         color="indigo"
       />
       <UsageProgressBar
-        v-if="quotaWeeklyBar"
+        v-if="!hideStandardWindows && quotaWeeklyBar"
         label="7d"
         :utilization="quotaWeeklyBar.utilization"
         :resets-at="quotaWeeklyBar.resetsAt"
@@ -484,17 +506,30 @@ import AccountQuotaInfo from './AccountQuotaInfo.vue'
 const _usageCache = new Map<number, { data: AccountUsageInfo; ts: number }>()
 const USAGE_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 
+type UsageWindowColumn = '5h' | '7d'
+
+interface WindowProgressDisplay {
+  utilization: number
+  resetsAt: string | null
+  windowStats?: WindowStats | null
+}
+
 const props = withDefaults(
   defineProps<{
     account: Account
     todayStats?: WindowStats | null
     todayStatsLoading?: boolean
     manualRefreshToken?: number
+    /** When set, render only this usage window (for dedicated list columns). */
+    window?: UsageWindowColumn
+    /** Hide 5h/7d bars in the combined usage column when split columns are shown. */
+    hideStandardWindows?: boolean
   }>(),
   {
     todayStats: null,
     todayStatsLoading: false,
-    manualRefreshToken: 0
+    manualRefreshToken: 0,
+    hideStandardWindows: false
   }
 )
 
@@ -527,6 +562,8 @@ const showUsageWindows = computed(() => {
   return props.account.type === 'oauth' || props.account.type === 'setup-token'
 })
 
+const isWindowColumn = computed(() => props.window === '5h' || props.window === '7d')
+
 const shouldFetchUsage = computed(() => {
   if (props.account.platform === 'anthropic') {
     return props.account.type === 'oauth' || props.account.type === 'setup-token'
@@ -541,6 +578,100 @@ const shouldFetchUsage = computed(() => {
     return props.account.type === 'oauth'
   }
   return false
+})
+
+const shouldFetchUsageForWindowColumn = computed(() => {
+  if (!isWindowColumn.value) return shouldFetchUsage.value
+  if (props.window === '7d' && (props.account.quota_weekly_limit ?? 0) > 0) {
+    return false
+  }
+  return shouldFetchUsage.value
+})
+
+const parseExtraNumber = (raw: unknown): number | null => {
+  if (raw == null || raw === '') return null
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : null
+}
+
+const codexProgressFromExtra = (window: UsageWindowColumn): WindowProgressDisplay | null => {
+  if (props.account.platform !== 'openai' || props.account.type !== 'oauth') return null
+  const extra = props.account.extra ?? {}
+  const usedPercent =
+    window === '5h'
+      ? parseExtraNumber(extra.codex_5h_used_percent)
+      : parseExtraNumber(extra.codex_7d_used_percent)
+  if (usedPercent == null) return null
+  const resetRaw =
+    window === '5h' ? extra.codex_5h_reset_at : extra.codex_7d_reset_at
+  return {
+    utilization: usedPercent,
+    resetsAt: typeof resetRaw === 'string' && resetRaw ? resetRaw : null
+  }
+}
+
+const anthropicWindowFromExtra = (window: UsageWindowColumn): WindowProgressDisplay | null => {
+  if (
+    props.account.platform !== 'anthropic' ||
+    (props.account.type !== 'oauth' && props.account.type !== 'setup-token')
+  ) {
+    return null
+  }
+  const extra = props.account.extra ?? {}
+  if (window === '5h') {
+    const util = parseExtraNumber(extra.session_window_utilization)
+    if (util == null) return null
+    return { utilization: util * 100, resetsAt: null }
+  }
+  const util = parseExtraNumber(extra.passive_usage_7d_utilization)
+  if (util == null) return null
+  let resetsAt: string | null = null
+  const resetRaw = extra.passive_usage_7d_reset
+  if (resetRaw != null && resetRaw !== '') {
+    const resetSeconds = Number(resetRaw)
+    if (Number.isFinite(resetSeconds) && resetSeconds > 0) {
+      resetsAt = new Date(resetSeconds * 1000).toISOString()
+    }
+  }
+  return { utilization: util * 100, resetsAt }
+}
+
+const windowProgress = computed((): WindowProgressDisplay | null => {
+  if (!isWindowColumn.value || !props.window) return null
+
+  if (props.window === '5h' && usageInfo.value?.five_hour) {
+    return {
+      utilization: usageInfo.value.five_hour.utilization,
+      resetsAt: usageInfo.value.five_hour.resets_at ?? null,
+      windowStats: usageInfo.value.five_hour.window_stats
+    }
+  }
+  if (props.window === '7d' && usageInfo.value?.seven_day) {
+    return {
+      utilization: usageInfo.value.seven_day.utilization,
+      resetsAt: usageInfo.value.seven_day.resets_at ?? null,
+      windowStats: usageInfo.value.seven_day.window_stats
+    }
+  }
+
+  const fromExtra =
+    codexProgressFromExtra(props.window) ?? anthropicWindowFromExtra(props.window)
+  if (fromExtra) return fromExtra
+
+  if (props.window === '7d' && quotaWeeklyBar.value) {
+    return {
+      utilization: quotaWeeklyBar.value.utilization,
+      resetsAt: quotaWeeklyBar.value.resetsAt
+    }
+  }
+
+  return null
+})
+
+const windowCellLoading = computed(() => {
+  if (!isWindowColumn.value) return false
+  if (windowProgress.value) return false
+  return shouldFetchUsageForWindowColumn.value && loading.value
 })
 
 const showGeminiTodayStats = computed(() => {
@@ -985,7 +1116,7 @@ const isAnthropicOAuthOrSetupToken = computed(() => {
 })
 
 const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?: boolean }) => {
-  if (!shouldFetchUsage.value) return
+  if (!shouldFetchUsageForWindowColumn.value) return
 
   // Check cache
   if (!options?.bypassCache) {
@@ -1028,7 +1159,7 @@ const flushPendingAutoLoad = () => {
 }
 
 const requestAutoLoad = (source?: 'passive' | 'active') => {
-  if (!shouldFetchUsage.value) return
+  if (!shouldFetchUsageForWindowColumn.value) return
   if (shouldLazyLoadOnMobile.value && !hasEnteredViewport.value) {
     pendingAutoLoad.value = true
     pendingAutoLoadSource.value = source
@@ -1180,6 +1311,7 @@ onMounted(() => {
   }
 
   if (!shouldAutoLoadUsageOnMount.value) return
+  if (isWindowColumn.value && !shouldFetchUsageForWindowColumn.value) return
   const source = isAnthropicOAuthOrSetupToken.value ? 'passive' : undefined
   requestAutoLoad(source)
 })
@@ -1195,7 +1327,7 @@ watch(
   () => props.manualRefreshToken,
   (nextToken, prevToken) => {
     if (nextToken === prevToken) return
-    if (!shouldFetchUsage.value) return
+    if (!shouldFetchUsageForWindowColumn.value) return
 
     const source = isAnthropicOAuthOrSetupToken.value ? 'passive' : undefined
     _usageCache.delete(props.account.id)

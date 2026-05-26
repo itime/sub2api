@@ -14,7 +14,8 @@ const REFRESH_TOKEN_KEY = 'refresh_token'
 const TOKEN_EXPIRES_AT_KEY = 'token_expires_at' // 存储过期时间戳而非有效期
 const PENDING_AUTH_SESSION_KEY = 'pending_auth_session'
 const AUTO_REFRESH_INTERVAL = 60 * 1000 // 60 seconds for user data refresh
-const TOKEN_REFRESH_BUFFER = 120 * 1000 // 120 seconds before expiry to refresh token
+const TOKEN_REFRESH_BUFFER = 5 * 60 * 1000 // refresh 5 minutes before access token expiry
+const TOKEN_REFRESH_ON_FOCUS_REMAINING = 60 * 60 * 1000 // when tab refocuses, refresh if < 1h left
 
 type PendingAuthTokenField = 'pending_auth_token' | 'pending_oauth_token'
 
@@ -79,6 +80,9 @@ export const useAuthStore = defineStore('auth', () => {
   const pendingAuthSession = ref<PendingAuthSessionSummary | null>(null)
   let refreshIntervalId: ReturnType<typeof setInterval> | null = null
   let tokenRefreshTimeoutId: ReturnType<typeof setTimeout> | null = null
+  let visibilityRefreshListener: (() => void) | null = null
+  let onlineRefreshListener: (() => void) | null = null
+  let authTokenRefreshedListener: ((event: Event) => void) | null = null
 
   // ==================== Computed ====================
 
@@ -127,6 +131,7 @@ export const useAuthStore = defineStore('auth', () => {
         if (savedRefreshToken && tokenExpiresAt.value !== null) {
           scheduleTokenRefreshAt(tokenExpiresAt.value)
         }
+        setupTokenRefreshListeners()
       } catch (error) {
         console.error('Failed to parse saved user data:', error)
         clearAuth({ preservePendingAuthSession: true })
@@ -208,13 +213,7 @@ export const useAuthStore = defineStore('auth', () => {
 
     try {
       const response = await authAPI.refreshToken()
-
-      // Update state
-      token.value = response.access_token
-      refreshTokenValue.value = response.refresh_token
-
-      // Schedule next refresh (this also updates tokenExpiresAt and localStorage)
-      scheduleTokenRefresh(response.expires_in)
+      applyRefreshedTokens(response.access_token, response.refresh_token, response.expires_in)
     } catch (error) {
       console.error('Token refresh failed:', error)
       // Don't clear auth here - the interceptor will handle 401 errors
@@ -228,6 +227,70 @@ export const useAuthStore = defineStore('auth', () => {
     if (tokenRefreshTimeoutId) {
       clearTimeout(tokenRefreshTimeoutId)
       tokenRefreshTimeoutId = null
+    }
+  }
+
+  function applyRefreshedTokens(accessToken: string, refreshToken: string, expiresInSeconds: number): void {
+    token.value = accessToken
+    refreshTokenValue.value = refreshToken
+    localStorage.setItem(AUTH_TOKEN_KEY, accessToken)
+    localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken)
+    scheduleTokenRefresh(expiresInSeconds)
+  }
+
+  function setupTokenRefreshListeners(): void {
+    if (typeof window === 'undefined') return
+
+    if (!visibilityRefreshListener) {
+      visibilityRefreshListener = () => {
+        if (document.visibilityState !== 'visible') return
+        if (!refreshTokenValue.value || tokenExpiresAt.value === null) return
+        const remaining = tokenExpiresAt.value - Date.now()
+        if (remaining > 0 && remaining <= TOKEN_REFRESH_ON_FOCUS_REMAINING) {
+          performTokenRefresh().catch((error) => {
+            console.error('Token refresh on focus failed:', error)
+          })
+        }
+      }
+      document.addEventListener('visibilitychange', visibilityRefreshListener)
+    }
+
+    if (!authTokenRefreshedListener) {
+      authTokenRefreshedListener = (event: Event) => {
+        const detail = (event as CustomEvent<{
+          access_token?: string
+          refresh_token?: string
+          expires_in?: number
+        }>).detail
+        if (!detail?.access_token || !detail.refresh_token || !detail.expires_in) return
+        applyRefreshedTokens(detail.access_token, detail.refresh_token, detail.expires_in)
+      }
+      window.addEventListener('auth-token-refreshed', authTokenRefreshedListener)
+    }
+
+    if (!onlineRefreshListener) {
+      onlineRefreshListener = () => {
+        if (!refreshTokenValue.value) return
+        performTokenRefresh().catch((error) => {
+          console.error('Token refresh after reconnect failed:', error)
+        })
+      }
+      window.addEventListener('online', onlineRefreshListener)
+    }
+  }
+
+  function teardownTokenRefreshListeners(): void {
+    if (visibilityRefreshListener) {
+      document.removeEventListener('visibilitychange', visibilityRefreshListener)
+      visibilityRefreshListener = null
+    }
+    if (onlineRefreshListener) {
+      window.removeEventListener('online', onlineRefreshListener)
+      onlineRefreshListener = null
+    }
+    if (authTokenRefreshedListener) {
+      window.removeEventListener('auth-token-refreshed', authTokenRefreshedListener)
+      authTokenRefreshedListener = null
     }
   }
 
@@ -309,6 +372,7 @@ export const useAuthStore = defineStore('auth', () => {
     if (response.refresh_token && response.expires_in) {
       scheduleTokenRefresh(response.expires_in)
     }
+    setupTokenRefreshListeners()
   }
 
   /**
@@ -368,6 +432,7 @@ export const useAuthStore = defineStore('auth', () => {
       if (savedRefreshToken && tokenExpiresAt.value !== null) {
         scheduleTokenRefreshAt(tokenExpiresAt.value)
       }
+      setupTokenRefreshListeners()
 
       clearPendingAuthSession()
       return userData
@@ -428,10 +493,7 @@ export const useAuthStore = defineStore('auth', () => {
 
       return userData
     } catch (error) {
-      // If refresh fails with 401, clear auth state
-      if ((error as { status?: number }).status === 401) {
-        clearAuth({ preservePendingAuthSession: pendingAuthSession.value !== null })
-      }
+      // Session clearing is handled centrally in api/client.ts for definitive auth failures.
       throw error
     }
   }
@@ -445,6 +507,7 @@ export const useAuthStore = defineStore('auth', () => {
     stopAutoRefresh()
     // Stop token refresh
     stopTokenRefresh()
+    teardownTokenRefreshListeners()
 
     token.value = null
     refreshTokenValue.value = null

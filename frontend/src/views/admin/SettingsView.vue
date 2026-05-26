@@ -5694,7 +5694,7 @@ const smtpPasswordManuallyEdited = ref(false);
 const testEmailAddress = ref("");
 const registrationEmailSuffixWhitelistTags = ref<string[]>([]);
 const registrationEmailSuffixWhitelistDraft = ref("");
-const tablePageSizeOptionsInput = ref("10, 20, 50, 100");
+const tablePageSizeOptionsInput = ref("10, 20, 50, 100, 200, 500, 1000");
 
 // Admin API Key 状态
 const adminApiKeyLoading = ref(true);
@@ -5848,7 +5848,7 @@ const form = reactive<SettingsForm>({
   payment_cancel_rate_limit_unit: "day",
   payment_cancel_rate_limit_window_mode: "rolling",
   table_default_page_size: tablePageSizeDefault,
-  table_page_size_options: [10, 20, 50, 100],
+  table_page_size_options: [10, 20, 50, 100, 200, 500, 1000],
   custom_menu_items: [] as Array<{
     id: string;
     label: string;
@@ -6481,7 +6481,7 @@ async function loadSettings() {
     tablePageSizeOptionsInput.value = formatTablePageSizeOptions(
       Array.isArray(settings.table_page_size_options)
         ? settings.table_page_size_options
-        : [10, 20, 50, 100],
+        : [10, 20, 50, 100, 200, 500, 1000],
     );
     registrationEmailSuffixWhitelistDraft.value = "";
     form.smtp_password = "";
@@ -6953,7 +6953,7 @@ async function saveSettings() {
     tablePageSizeOptionsInput.value = formatTablePageSizeOptions(
       Array.isArray(updated.table_page_size_options)
         ? updated.table_page_size_options
-        : [10, 20, 50, 100],
+        : [10, 20, 50, 100, 200, 500, 1000],
     );
     registrationEmailSuffixWhitelistDraft.value = "";
     form.smtp_password = "";

@@ -295,6 +295,10 @@ func (s *stubAdminService) BatchSetGroupRPMOverrides(_ context.Context, _ int64,
 	return nil
 }
 
+func (s *stubAdminService) CountAccountStatusSummary(ctx context.Context, platform, accountType, search string, groupID int64, privacyMode string) (map[string]int64, error) {
+	return map[string]int64{"all": 0}, nil
+}
+
 func (s *stubAdminService) ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string) ([]service.Account, int64, error) {
 	s.lastListAccounts.platform = platform
 	s.lastListAccounts.accountType = accountType
@@ -603,6 +607,10 @@ func (s *stubAdminService) ForceAntigravityPrivacy(ctx context.Context, account 
 
 func (s *stubAdminService) ReplaceUserGroup(ctx context.Context, userID, oldGroupID, newGroupID int64) (*service.ReplaceUserGroupResult, error) {
 	return &service.ReplaceUserGroupResult{MigratedKeys: 0}, nil
+}
+
+func (s *stubAdminService) BackfillAccountCreatedAtByEmail(ctx context.Context, email string, createdAt time.Time, overrideExisting bool) (int64, bool, string, error) {
+	return 0, false, "not_found", nil
 }
 
 // Ensure stub implements interface.

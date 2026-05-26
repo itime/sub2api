@@ -240,22 +240,10 @@ func (h *AccountHandler) List(c *gin.Context) {
 	}
 	lite := parseBoolQueryWithDefault(c.Query("lite"), false)
 
-	var groupID int64
-	if groupIDStr := c.Query("group"); groupIDStr != "" {
-		if groupIDStr == accountListGroupUngroupedQueryValue {
-			groupID = service.AccountListGroupUngrouped
-		} else {
-			parsedGroupID, parseErr := strconv.ParseInt(groupIDStr, 10, 64)
-			if parseErr != nil {
-				response.ErrorFrom(c, infraerrors.BadRequest("INVALID_GROUP_FILTER", "invalid group filter"))
-				return
-			}
-			if parsedGroupID < 0 {
-				response.ErrorFrom(c, infraerrors.BadRequest("INVALID_GROUP_FILTER", "invalid group filter"))
-				return
-			}
-			groupID = parsedGroupID
-		}
+	groupID, err := parseAccountListGroupFilter(c)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
 	}
 
 	accounts, total, err := h.adminService.ListAccounts(c.Request.Context(), page, pageSize, platform, accountType, status, search, groupID, privacyMode, sortBy, sortOrder)
@@ -446,6 +434,47 @@ func ifNoneMatchMatched(ifNoneMatch, etag string) bool {
 		}
 	}
 	return false
+}
+
+func parseAccountListGroupFilter(c *gin.Context) (int64, error) {
+	groupIDStr := c.Query("group")
+	if groupIDStr == "" {
+		return 0, nil
+	}
+	if groupIDStr == accountListGroupUngroupedQueryValue {
+		return service.AccountListGroupUngrouped, nil
+	}
+	parsedGroupID, err := strconv.ParseInt(groupIDStr, 10, 64)
+	if err != nil || parsedGroupID < 0 {
+		return 0, infraerrors.BadRequest("INVALID_GROUP_FILTER", "invalid group filter")
+	}
+	return parsedGroupID, nil
+}
+
+// StatusCounts returns account counts grouped by runtime status filter.
+// GET /api/v1/admin/accounts/status-counts
+func (h *AccountHandler) StatusCounts(c *gin.Context) {
+	platform := c.Query("platform")
+	accountType := c.Query("type")
+	search := strings.TrimSpace(c.Query("search"))
+	if len(search) > 100 {
+		search = search[:100]
+	}
+	privacyMode := strings.TrimSpace(c.Query("privacy_mode"))
+
+	groupID, err := parseAccountListGroupFilter(c)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	counts, err := h.adminService.CountAccountStatusSummary(c.Request.Context(), platform, accountType, search, groupID, privacyMode)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	response.Success(c, gin.H{"counts": counts})
 }
 
 // GetByID handles getting an account by ID

@@ -2617,6 +2617,10 @@ export default {
       allPlatforms: 'All Platforms',
       allTypes: 'All Types',
       allStatus: 'All Status',
+      statusTabs: {
+        label: 'Filter by status',
+        all: 'All'
+      },
       allGroups: 'All Groups',
       ungroupedGroup: 'Ungrouped',
       oauthType: 'OAuth',
@@ -2683,7 +2687,9 @@ export default {
         schedulable: 'Schedulable',
         todayStats: 'Today Stats',
         groups: 'Groups',
-        usageWindows: 'Usage Windows',
+        usage5h: '5h Usage',
+        usage7d: '7d Usage',
+        usageWindows: 'Other Usage',
         proxy: 'Proxy',
         lastUsed: 'Last Used',
         expiresAt: 'Expires At',

@@ -95,6 +95,11 @@ func (r *accountRepository) Create(ctx context.Context, account *service.Account
 		SetSchedulable(account.Schedulable).
 		SetAutoPauseOnExpired(account.AutoPauseOnExpired)
 
+	// 仅当上层显式设置了 CreatedAt 时才覆盖默认值，避免影响普通新建场景。
+	if !account.CreatedAt.IsZero() {
+		builder.SetCreatedAt(account.CreatedAt)
+	}
+
 	if account.RateMultiplier != nil {
 		builder.SetRateMultiplier(*account.RateMultiplier)
 	}
@@ -460,75 +465,12 @@ func (r *accountRepository) List(ctx context.Context, params pagination.Paginati
 	return r.ListWithFilters(ctx, params, "", "", "", "", 0, "")
 }
 
-func (r *accountRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, *pagination.PaginationResult, error) {
-	q := r.client.Account.Query()
-
+func applyAccountListBaseFilters(q *dbent.AccountQuery, platform, accountType, search string, groupID int64, privacyMode string) *dbent.AccountQuery {
 	if platform != "" {
 		q = q.Where(dbaccount.PlatformEQ(platform))
 	}
 	if accountType != "" {
 		q = q.Where(dbaccount.TypeEQ(accountType))
-	}
-	if status != "" {
-		switch status {
-		case service.StatusActive:
-			q = q.Where(
-				dbaccount.StatusEQ(status),
-				dbaccount.SchedulableEQ(true),
-				dbaccount.Or(
-					dbaccount.RateLimitResetAtIsNil(),
-					dbaccount.RateLimitResetAtLTE(time.Now()),
-				),
-				dbpredicate.Account(func(s *entsql.Selector) {
-					col := s.C("temp_unschedulable_until")
-					s.Where(entsql.Or(
-						entsql.IsNull(col),
-						entsql.LTE(col, entsql.Expr("NOW()")),
-					))
-				}),
-			)
-		case "rate_limited":
-			q = q.Where(
-				dbaccount.StatusEQ(service.StatusActive),
-				dbaccount.RateLimitResetAtGT(time.Now()),
-				dbpredicate.Account(func(s *entsql.Selector) {
-					col := s.C("temp_unschedulable_until")
-					s.Where(entsql.Or(
-						entsql.IsNull(col),
-						entsql.LTE(col, entsql.Expr("NOW()")),
-					))
-				}),
-			)
-		case "temp_unschedulable":
-			q = q.Where(
-				dbaccount.StatusEQ(service.StatusActive),
-				dbpredicate.Account(func(s *entsql.Selector) {
-					col := s.C("temp_unschedulable_until")
-					s.Where(entsql.And(
-						entsql.Not(entsql.IsNull(col)),
-						entsql.GT(col, entsql.Expr("NOW()")),
-					))
-				}),
-			)
-		case "unschedulable":
-			q = q.Where(
-				dbaccount.StatusEQ(service.StatusActive),
-				dbaccount.SchedulableEQ(false),
-				dbaccount.Or(
-					dbaccount.RateLimitResetAtIsNil(),
-					dbaccount.RateLimitResetAtLTE(time.Now()),
-				),
-				dbpredicate.Account(func(s *entsql.Selector) {
-					col := s.C("temp_unschedulable_until")
-					s.Where(entsql.Or(
-						entsql.IsNull(col),
-						entsql.LTE(col, entsql.Expr("NOW()")),
-					))
-				}),
-			)
-		default:
-			q = q.Where(dbaccount.StatusEQ(status))
-		}
 	}
 	if search != "" {
 		q = q.Where(dbaccount.NameContainsFold(search))
@@ -552,6 +494,106 @@ func (r *accountRepository) ListWithFilters(ctx context.Context, params paginati
 			}
 		}))
 	}
+	return q
+}
+
+func applyAccountStatusFilter(q *dbent.AccountQuery, status string) *dbent.AccountQuery {
+	if status == "" {
+		return q
+	}
+	switch status {
+	case service.StatusActive:
+		return q.Where(
+			dbaccount.StatusEQ(status),
+			dbaccount.SchedulableEQ(true),
+			dbaccount.Or(
+				dbaccount.RateLimitResetAtIsNil(),
+				dbaccount.RateLimitResetAtLTE(time.Now()),
+			),
+			dbpredicate.Account(func(s *entsql.Selector) {
+				col := s.C("temp_unschedulable_until")
+				s.Where(entsql.Or(
+					entsql.IsNull(col),
+					entsql.LTE(col, entsql.Expr("NOW()")),
+				))
+			}),
+		)
+	case "rate_limited":
+		return q.Where(
+			dbaccount.StatusEQ(service.StatusActive),
+			dbaccount.RateLimitResetAtGT(time.Now()),
+			dbpredicate.Account(func(s *entsql.Selector) {
+				col := s.C("temp_unschedulable_until")
+				s.Where(entsql.Or(
+					entsql.IsNull(col),
+					entsql.LTE(col, entsql.Expr("NOW()")),
+				))
+			}),
+		)
+	case "temp_unschedulable":
+		return q.Where(
+			dbaccount.StatusEQ(service.StatusActive),
+			dbpredicate.Account(func(s *entsql.Selector) {
+				col := s.C("temp_unschedulable_until")
+				s.Where(entsql.And(
+					entsql.Not(entsql.IsNull(col)),
+					entsql.GT(col, entsql.Expr("NOW()")),
+				))
+			}),
+		)
+	case "unschedulable":
+		return q.Where(
+			dbaccount.StatusEQ(service.StatusActive),
+			dbaccount.SchedulableEQ(false),
+			dbaccount.Or(
+				dbaccount.RateLimitResetAtIsNil(),
+				dbaccount.RateLimitResetAtLTE(time.Now()),
+			),
+			dbpredicate.Account(func(s *entsql.Selector) {
+				col := s.C("temp_unschedulable_until")
+				s.Where(entsql.Or(
+					entsql.IsNull(col),
+					entsql.LTE(col, entsql.Expr("NOW()")),
+				))
+			}),
+		)
+	default:
+		return q.Where(dbaccount.StatusEQ(status))
+	}
+}
+
+func (r *accountRepository) CountStatusSummary(ctx context.Context, platform, accountType, search string, groupID int64, privacyMode string) (map[string]int64, error) {
+	statusFilters := []struct {
+		key    string
+		status string
+	}{
+		{key: "all", status: ""},
+		{key: "active", status: service.StatusActive},
+		{key: "inactive", status: "inactive"},
+		{key: "error", status: service.StatusError},
+		{key: "rate_limited", status: "rate_limited"},
+		{key: "temp_unschedulable", status: "temp_unschedulable"},
+		{key: "unschedulable", status: "unschedulable"},
+	}
+
+	counts := make(map[string]int64, len(statusFilters))
+	for _, item := range statusFilters {
+		q := r.client.Account.Query()
+		q = applyAccountListBaseFilters(q, platform, accountType, search, groupID, privacyMode)
+		q = applyAccountStatusFilter(q, item.status)
+		total, err := q.Count(ctx)
+		if err != nil {
+			return nil, err
+		}
+		counts[item.key] = int64(total)
+	}
+	return counts, nil
+}
+
+func (r *accountRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, *pagination.PaginationResult, error) {
+	q := r.client.Account.Query()
+	q = applyAccountListBaseFilters(q, platform, accountType, search, groupID, privacyMode)
+	q = applyAccountStatusFilter(q, status)
 
 	total, err := q.Count(ctx)
 	if err != nil {
@@ -613,6 +655,59 @@ func accountListOrder(params pagination.PaginationParams) []func(*entsql.Selecto
 	case "rate_limit_reset_at":
 		field = dbaccount.FieldRateLimitResetAt
 		defaultOrder = false
+	case "usage_5h":
+		// 用 extra 中的 5h 利用率排序：
+		//   - OpenAI codex: extra->>'codex_5h_used_percent' (0~100)
+		//   - Anthropic OAuth/SetupToken: extra->>'session_window_utilization' (0~1)
+		const expr5h = `COALESCE(NULLIF(extra->>'codex_5h_used_percent','')::float, NULLIF(extra->>'session_window_utilization','')::float * 100, 0)`
+		if sortOrder == pagination.SortOrderDesc {
+			return []func(*entsql.Selector){
+				func(s *entsql.Selector) { s.OrderExpr(entsql.Expr(expr5h + " DESC")) },
+				dbent.Desc(dbaccount.FieldID),
+			}
+		}
+		return []func(*entsql.Selector){
+			func(s *entsql.Selector) { s.OrderExpr(entsql.Expr(expr5h + " ASC")) },
+			dbent.Asc(dbaccount.FieldID),
+		}
+	case "usage_7d":
+		// 用 extra 中的 7d 利用率排序：
+		//   - OpenAI codex: extra->>'codex_7d_used_percent' (0~100)
+		//   - Anthropic OAuth/SetupToken: extra->>'passive_usage_7d_utilization' (0~1)
+		// 都缺失时按 0 处理，避免 NULL 导致排序在末尾的不直观行为
+		const expr = `COALESCE(NULLIF(extra->>'codex_7d_used_percent','')::float, NULLIF(extra->>'passive_usage_7d_utilization','')::float * 100, 0)`
+		if sortOrder == pagination.SortOrderDesc {
+			return []func(*entsql.Selector){
+				func(s *entsql.Selector) { s.OrderExpr(entsql.Expr(expr + " DESC")) },
+				dbent.Desc(dbaccount.FieldID),
+			}
+		}
+		return []func(*entsql.Selector){
+			func(s *entsql.Selector) { s.OrderExpr(entsql.Expr(expr + " ASC")) },
+			dbent.Asc(dbaccount.FieldID),
+		}
+	case "usage_7d_reset_at":
+		// 7d 窗口恢复时间（越早恢复越靠前）：
+		//   - OpenAI codex: extra->>'codex_7d_reset_at'
+		//   - Anthropic OAuth/SetupToken: extra->>'passive_usage_7d_reset' (unix 秒)
+		//   - 回退 rate_limit_reset_at（限流 Tab 常见）
+		const exprReset = `COALESCE(
+			NULLIF(extra->>'codex_7d_reset_at','')::timestamptz,
+			CASE WHEN NULLIF(extra->>'passive_usage_7d_reset','') ~ '^[0-9]+$'
+				THEN to_timestamp(NULLIF(extra->>'passive_usage_7d_reset','')::double precision)
+				ELSE NULL END,
+			rate_limit_reset_at
+		)`
+		if sortOrder == pagination.SortOrderDesc {
+			return []func(*entsql.Selector){
+				func(s *entsql.Selector) { s.OrderExpr(entsql.Expr(exprReset + " DESC NULLS LAST")) },
+				dbent.Desc(dbaccount.FieldID),
+			}
+		}
+		return []func(*entsql.Selector){
+			func(s *entsql.Selector) { s.OrderExpr(entsql.Expr(exprReset + " ASC NULLS LAST")) },
+			dbent.Asc(dbaccount.FieldID),
+		}
 	}
 
 	if sortOrder == pagination.SortOrderDesc {
@@ -2024,4 +2119,92 @@ func (r *accountRepository) ResetQuotaUsed(ctx context.Context, id int64) error 
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue quota reset failed: account=%d err=%v", id, err)
 	}
 	return nil
+}
+
+// FindIDByEmail 按邮箱匹配账号，返回最早创建的一条 ID。
+//
+// 匹配逻辑（按优先级顺序）：
+//  1. credentials->>'email'（OAuth/账号导入主路径写入）
+//  2. extra->>'email'（旧版 openai-free 写入位置）
+//  3. name 列（部分账号直接以邮箱命名）
+//
+// 比对采用 LOWER 精确匹配，软删除（deleted_at）账号会被排除。
+func (r *accountRepository) FindIDByEmail(ctx context.Context, email string) (int64, error) {
+	normalized := strings.TrimSpace(strings.ToLower(email))
+	if normalized == "" {
+		return 0, nil
+	}
+
+	row := r.sql.QueryContext
+	const query = `
+SELECT id FROM accounts
+WHERE deleted_at IS NULL
+  AND (
+        LOWER(COALESCE(credentials->>'email', '')) = $1
+     OR LOWER(COALESCE(extra->>'email', '')) = $1
+     OR LOWER(COALESCE(name, '')) = $1
+  )
+ORDER BY created_at ASC
+LIMIT 1
+`
+	rows, err := row(ctx, query, normalized)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		return 0, nil
+	}
+	var id int64
+	if err := rows.Scan(&id); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// SetCreatedAt 强制覆写 accounts.created_at（绕过 ent immutable 约束）。
+// 同时显式更新 updated_at 以保持记录一致性。
+func (r *accountRepository) SetCreatedAt(ctx context.Context, id int64, createdAt time.Time) error {
+	if id <= 0 {
+		return service.ErrAccountNotFound
+	}
+	const stmt = `
+UPDATE accounts
+SET created_at = $2,
+    updated_at = NOW()
+WHERE id = $1 AND deleted_at IS NULL
+`
+	res, err := r.sql.ExecContext(ctx, stmt, id, createdAt.UTC())
+	if err != nil {
+		return err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return service.ErrAccountNotFound
+	}
+	return nil
+}
+
+// GetCreatedAndUpdatedAt 仅取 created_at 和 updated_at，避免触发完整的账号查询和 group 加载。
+func (r *accountRepository) GetCreatedAndUpdatedAt(ctx context.Context, id int64) (time.Time, time.Time, error) {
+	if id <= 0 {
+		return time.Time{}, time.Time{}, service.ErrAccountNotFound
+	}
+	const query = `
+SELECT created_at, updated_at FROM accounts
+WHERE id = $1 AND deleted_at IS NULL
+LIMIT 1
+`
+	rows, err := r.sql.QueryContext(ctx, query, id)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		return time.Time{}, time.Time{}, service.ErrAccountNotFound
+	}
+	var createdAt, updatedAt time.Time
+	if err := rows.Scan(&createdAt, &updatedAt); err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	return createdAt, updatedAt, nil
 }

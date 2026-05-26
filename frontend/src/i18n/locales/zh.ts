@@ -2696,6 +2696,10 @@ export default {
       allPlatforms: '全部平台',
       allTypes: '全部类型',
       allStatus: '全部状态',
+      statusTabs: {
+        label: '按状态筛选',
+        all: '全部'
+      },
       allGroups: '全部分组',
       ungroupedGroup: '未分配分组',
       oauthType: 'OAuth',
@@ -2721,7 +2725,9 @@ export default {
         schedulable: '调度',
         todayStats: '今日统计',
         groups: '分组',
-        usageWindows: '用量窗口',
+        usage5h: '5h 用量',
+        usage7d: '7d 用量',
+        usageWindows: '其他用量',
         proxy: '代理',
         lastUsed: '最近使用',
         expiresAt: '过期时间',

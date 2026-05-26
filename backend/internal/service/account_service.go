@@ -38,6 +38,7 @@ type AccountRepository interface {
 
 	List(ctx context.Context, params pagination.PaginationParams) ([]Account, *pagination.PaginationResult, error)
 	ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode string) ([]Account, *pagination.PaginationResult, error)
+	CountStatusSummary(ctx context.Context, platform, accountType, search string, groupID int64, privacyMode string) (map[string]int64, error)
 	ListByGroup(ctx context.Context, groupID int64) ([]Account, error)
 	ListActive(ctx context.Context) ([]Account, error)
 	ListByPlatform(ctx context.Context, platform string) ([]Account, error)
@@ -74,6 +75,14 @@ type AccountRepository interface {
 	IncrementQuotaUsed(ctx context.Context, id int64, amount float64) error
 	// ResetQuotaUsed 重置 API Key 账号所有维度的配额用量为 0
 	ResetQuotaUsed(ctx context.Context, id int64) error
+	// FindIDByEmail 按邮箱在 credentials/extra/name 中模糊匹配，返回最早创建的一条账号 ID。
+	// 用于历史数据回填等管理操作；找不到时返回 (0, nil)。
+	FindIDByEmail(ctx context.Context, email string) (int64, error)
+	// SetCreatedAt 直接更新账号 created_at（绕过 ent 的 immutable 限制）。
+	// 仅用于管理员级别的数据回填，普通业务路径不应调用。
+	SetCreatedAt(ctx context.Context, id int64, createdAt time.Time) error
+	// GetCreatedAndUpdatedAt 返回账号的 created_at 和 updated_at，用于回填决策。
+	GetCreatedAndUpdatedAt(ctx context.Context, id int64) (time.Time, time.Time, error)
 }
 
 // AccountBulkUpdate describes the fields that can be updated in a bulk operation.

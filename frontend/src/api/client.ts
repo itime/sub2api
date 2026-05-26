@@ -42,6 +42,33 @@ function onTokenRefreshed(token: string): void {
   refreshSubscribers = []
 }
 
+/** True when refresh failed due to network/timeout/5xx — session should be kept. */
+function isTransientRefreshFailure(error: unknown): boolean {
+  if (error instanceof Error && error.message === 'Token refresh failed') {
+    return false
+  }
+  if (!axios.isAxiosError(error)) {
+    return true
+  }
+  if (!error.response) {
+    return true
+  }
+  const status = error.response.status
+  return status >= 500 && status < 600
+}
+
+function clearStoredAuthAndRedirectToLogin(): void {
+  localStorage.removeItem('auth_token')
+  localStorage.removeItem('refresh_token')
+  localStorage.removeItem('auth_user')
+  localStorage.removeItem('token_expires_at')
+  sessionStorage.setItem('auth_expired', '1')
+
+  if (!window.location.pathname.includes('/login')) {
+    window.location.href = '/login'
+  }
+}
+
 // ==================== Request Interceptor ====================
 
 // Get user's timezone
@@ -205,6 +232,20 @@ apiClient.interceptors.response.use(
               localStorage.setItem('refresh_token', newRefreshToken)
               localStorage.setItem('token_expires_at', String(Date.now() + expires_in * 1000))
 
+              try {
+                window.dispatchEvent(
+                  new CustomEvent('auth-token-refreshed', {
+                    detail: {
+                      access_token,
+                      refresh_token: newRefreshToken,
+                      expires_in
+                    }
+                  })
+                )
+              } catch {
+                // ignore event failures
+              }
+
               // Notify subscribers with new token
               onTokenRefreshed(access_token)
 
@@ -224,16 +265,16 @@ apiClient.interceptors.response.use(
             onTokenRefreshed('')
             isRefreshing = false
 
-            // Clear tokens and redirect to login
-            localStorage.removeItem('auth_token')
-            localStorage.removeItem('refresh_token')
-            localStorage.removeItem('auth_user')
-            localStorage.removeItem('token_expires_at')
-            sessionStorage.setItem('auth_expired', '1')
-
-            if (!window.location.pathname.includes('/login')) {
-              window.location.href = '/login'
+            if (isTransientRefreshFailure(refreshError)) {
+              return Promise.reject({
+                status: 0,
+                code: 'NETWORK_ERROR',
+                message: 'Network error. Please check your connection.'
+              })
             }
+
+            // Definitive auth failure — clear session
+            clearStoredAuthAndRedirectToLogin()
 
             return Promise.reject({
               status: 401,
@@ -254,16 +295,8 @@ apiClient.interceptors.response.use(
               ? authHeader.length > 0
               : !!authHeader
 
-        localStorage.removeItem('auth_token')
-        localStorage.removeItem('refresh_token')
-        localStorage.removeItem('auth_user')
-        localStorage.removeItem('token_expires_at')
         if ((hasToken || sentAuth) && !isAuthEndpoint) {
-          sessionStorage.setItem('auth_expired', '1')
-        }
-        // Only redirect if not already on login page
-        if (!window.location.pathname.includes('/login')) {
-          window.location.href = '/login'
+          clearStoredAuthAndRedirectToLogin()
         }
       }
 

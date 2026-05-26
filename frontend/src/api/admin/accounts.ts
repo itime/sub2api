@@ -56,6 +56,29 @@ export async function list(
   return data
 }
 
+export interface AccountStatusCounts {
+  all: number
+  active: number
+  inactive: number
+  error: number
+  rate_limited: number
+  temp_unschedulable: number
+  unschedulable: number
+}
+
+export async function getStatusCounts(filters?: {
+  platform?: string
+  type?: string
+  group?: string
+  search?: string
+  privacy_mode?: string
+}): Promise<AccountStatusCounts> {
+  const { data } = await apiClient.get<{ counts: AccountStatusCounts }>('/admin/accounts/status-counts', {
+    params: filters
+  })
+  return data.counts
+}
+
 export interface AccountListWithEtagResult {
   notModified: boolean
   etag: string | null
@@ -632,6 +655,7 @@ export async function setPrivacy(id: number): Promise<Account> {
 
 export const accountsAPI = {
   list,
+  getStatusCounts,
   listWithEtag,
   getById,
   create,
