@@ -75,6 +75,7 @@ type DataImportResult struct {
 	ProxyReused    int               `json:"proxy_reused"`
 	ProxyFailed    int               `json:"proxy_failed"`
 	AccountCreated int               `json:"account_created"`
+	AccountUpdated int               `json:"account_updated"`
 	AccountFailed  int               `json:"account_failed"`
 	Errors         []DataImportError `json:"errors,omitempty"`
 }
@@ -327,6 +328,64 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 
 		enrichCredentialsFromIDToken(&item)
 
+		existingAccount, err := h.findImportAccountForUpdate(ctx, item)
+		if err != nil {
+			result.AccountFailed++
+			result.Errors = append(result.Errors, DataImportError{
+				Kind:    "account",
+				Name:    item.Name,
+				Message: err.Error(),
+			})
+			continue
+		}
+		if existingAccount != nil {
+			concurrency := item.Concurrency
+			priority := item.Priority
+			updateInput := &service.UpdateAccountInput{
+				Name:                  item.Name,
+				Notes:                 item.Notes,
+				Type:                  item.Type,
+				Credentials:           item.Credentials,
+				Extra:                 item.Extra,
+				ProxyID:               normalizeImportedProxyID(proxyID, item.ProxyKey != nil),
+				Concurrency:           &concurrency,
+				Priority:              &priority,
+				RateMultiplier:        item.RateMultiplier,
+				GroupIDs:              &item.GroupIDs,
+				ExpiresAt:             item.ExpiresAt,
+				AutoPauseOnExpired:    item.AutoPauseOnExpired,
+				Status:                service.StatusActive,
+				SkipMixedChannelCheck: true,
+			}
+			updated, updateErr := h.adminService.UpdateAccount(ctx, existingAccount.ID, updateInput)
+			if updateErr != nil {
+				result.AccountFailed++
+				result.Errors = append(result.Errors, DataImportError{
+					Kind:    "account",
+					Name:    item.Name,
+					Message: updateErr.Error(),
+				})
+				continue
+			}
+			if _, clearErr := h.adminService.ClearAccountError(ctx, existingAccount.ID); clearErr != nil {
+				slog.Warn("import_account_clear_error_failed", "account_id", existingAccount.ID, "error", clearErr)
+			}
+			if _, schedErr := h.adminService.SetAccountSchedulable(ctx, existingAccount.ID, true); schedErr != nil {
+				result.AccountFailed++
+				result.Errors = append(result.Errors, DataImportError{
+					Kind:    "account",
+					Name:    item.Name,
+					Message: schedErr.Error(),
+				})
+				continue
+			}
+			if updated.Platform == service.PlatformAntigravity && updated.Type == service.AccountTypeOAuth {
+				privacyAccounts = append(privacyAccounts, updated)
+			}
+			result.AccountUpdated++
+			continue
+		}
+
 		accountInput := &service.CreateAccountInput{
 			Name:                 item.Name,
 			Notes:                item.Notes,
@@ -380,6 +439,73 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 	}
 
 	return result, nil
+}
+
+func normalizeImportedProxyID(proxyID *int64, explicit bool) *int64 {
+	if proxyID != nil {
+		return proxyID
+	}
+	if !explicit {
+		return nil
+	}
+	zero := int64(0)
+	return &zero
+}
+
+func (h *AccountHandler) findImportAccountForUpdate(ctx context.Context, item DataAccount) (*service.Account, error) {
+	email := importAccountEmail(item)
+	if email == "" {
+		return nil, nil
+	}
+
+	accounts, err := h.listAccountsFiltered(ctx, item.Platform, item.Type, "", "", 0, "", "created_at", "desc")
+	if err != nil {
+		return nil, err
+	}
+	for i := range accounts {
+		if importExistingAccountEmail(accounts[i]) == email {
+			return &accounts[i], nil
+		}
+	}
+	return nil, nil
+}
+
+func importAccountEmail(item DataAccount) string {
+	for _, value := range []any{
+		item.Credentials["email"],
+		item.Extra["email"],
+		item.Name,
+	} {
+		if email := normalizeImportEmail(value); email != "" {
+			return email
+		}
+	}
+	return ""
+}
+
+func importExistingAccountEmail(account service.Account) string {
+	for _, value := range []any{
+		account.Credentials["email"],
+		account.Extra["email"],
+		account.Name,
+	} {
+		if email := normalizeImportEmail(value); email != "" {
+			return email
+		}
+	}
+	return ""
+}
+
+func normalizeImportEmail(value any) string {
+	email, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	email = strings.ToLower(strings.TrimSpace(email))
+	if !strings.Contains(email, "@") {
+		return ""
+	}
+	return email
 }
 
 func (h *AccountHandler) listAllProxies(ctx context.Context) ([]service.Proxy, error) {

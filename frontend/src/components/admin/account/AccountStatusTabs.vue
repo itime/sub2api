@@ -66,9 +66,9 @@ const { t } = useI18n()
 const tabDefs: Array<{ value: AccountStatusTabValue; countKey: keyof AccountStatusCounts; labelKey: string }> = [
   { value: '', countKey: 'all', labelKey: 'admin.accounts.statusTabs.all' },
   { value: 'active', countKey: 'active', labelKey: 'admin.accounts.status.active' },
+  { value: 'rate_limited', countKey: 'rate_limited', labelKey: 'admin.accounts.status.rateLimited' },
   { value: 'inactive', countKey: 'inactive', labelKey: 'admin.accounts.status.inactive' },
   { value: 'error', countKey: 'error', labelKey: 'admin.accounts.status.error' },
-  { value: 'rate_limited', countKey: 'rate_limited', labelKey: 'admin.accounts.status.rateLimited' },
   { value: 'temp_unschedulable', countKey: 'temp_unschedulable', labelKey: 'admin.accounts.status.tempUnschedulable' },
   { value: 'unschedulable', countKey: 'unschedulable', labelKey: 'admin.accounts.status.unschedulable' }
 ]

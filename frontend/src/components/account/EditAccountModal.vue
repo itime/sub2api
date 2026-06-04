@@ -2406,11 +2406,26 @@ const form = reactive({
   expires_at: null as number | null
 })
 
+const isPermanentlyDeactivated = computed(() => {
+  const account = props.account
+  if (!account) return false
+  const extra = account.extra as Record<string, unknown> | undefined
+  const reason = typeof extra?.deactivation_reason === 'string' ? extra.deactivation_reason.toLowerCase() : ''
+  return (
+    account.error_message?.toLowerCase().includes('account_deactivated') === true ||
+    extra?.permanent_deactivation === true ||
+    extra?.account_deactivated === true ||
+    reason.includes('account_deactivated')
+  )
+})
+
 const statusOptions = computed(() => {
   const options = [
-    { value: 'active', label: t('common.active') },
     { value: 'inactive', label: t('common.inactive') }
   ]
+  if (!isPermanentlyDeactivated.value) {
+    options.unshift({ value: 'active', label: t('common.active') })
+  }
   if (form.status === 'error') {
     options.push({ value: 'error', label: t('admin.accounts.status.error') })
   }
@@ -3199,6 +3214,10 @@ const handleSubmit = async () => {
 
   if (form.status !== 'active' && form.status !== 'inactive' && form.status !== 'error') {
     appStore.showError(t('admin.accounts.pleaseSelectStatus'))
+    return
+  }
+  if (isPermanentlyDeactivated.value && form.status === 'active') {
+    appStore.showError(t('admin.accounts.permanentlyDeactivatedHint'))
     return
   }
 

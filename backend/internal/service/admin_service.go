@@ -24,6 +24,48 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/util/httputil"
 )
 
+const permanentlyDeactivatedErrorMarker = "account_deactivated"
+
+func permanentlyDeactivatedAccountError() error {
+	return infraerrors.Conflict(
+		"ACCOUNT_PERMANENTLY_DEACTIVATED",
+		"account is permanently deactivated and cannot be reactivated",
+	)
+}
+
+func isPermanentlyDeactivatedAccount(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	if strings.Contains(strings.ToLower(account.ErrorMessage), permanentlyDeactivatedErrorMarker) {
+		return true
+	}
+	if account.Extra != nil {
+		if value, ok := account.Extra["permanent_deactivation"].(bool); ok && value {
+			return true
+		}
+		if value, ok := account.Extra["account_deactivated"].(bool); ok && value {
+			return true
+		}
+		reason := strings.ToLower(fmt.Sprint(account.Extra["deactivation_reason"]))
+		if strings.Contains(reason, permanentlyDeactivatedErrorMarker) {
+			return true
+		}
+	}
+	return false
+}
+
+func preservePermanentDeactivationExtra(dst map[string]any, src map[string]any) {
+	if dst == nil || src == nil {
+		return
+	}
+	for _, key := range []string{"permanent_deactivation", "account_deactivated", "deactivation_reason"} {
+		if v, ok := src[key]; ok {
+			dst[key] = v
+		}
+	}
+}
+
 // AdminService interface defines admin management operations
 type AdminService interface {
 	// User management
@@ -2473,6 +2515,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if err != nil {
 		return nil, err
 	}
+	if input.Status == StatusActive && isPermanentlyDeactivatedAccount(account) {
+		return nil, permanentlyDeactivatedAccountError()
+	}
 	wasOveragesEnabled := account.IsOveragesEnabled()
 
 	if input.Name != "" {
@@ -2496,6 +2541,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 				input.Extra[key] = v
 			}
 		}
+		preservePermanentDeactivationExtra(input.Extra, account.Extra)
 		account.Extra = input.Extra
 		if account.Platform == PlatformAntigravity && wasOveragesEnabled && !account.IsOveragesEnabled() {
 			delete(account.Extra, "antigravity_credits_overages") // 清理旧版 overages 运行态
@@ -2655,6 +2701,19 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		}
 	}
 
+	protectedAccountIDs := map[int64]struct{}{}
+	if input.Status == StatusActive || (input.Schedulable != nil && *input.Schedulable) {
+		accounts, err := s.accountRepo.GetByIDs(ctx, input.AccountIDs)
+		if err != nil {
+			return nil, err
+		}
+		for _, account := range accounts {
+			if isPermanentlyDeactivatedAccount(account) {
+				protectedAccountIDs[account.ID] = struct{}{}
+			}
+		}
+	}
+
 	// Prepare bulk updates for columns and JSONB fields.
 	repoUpdates := AccountBulkUpdate{
 		Credentials: input.Credentials,
@@ -2691,14 +2750,35 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		repoUpdates.Schedulable = input.Schedulable
 	}
 
+	updateIDs := input.AccountIDs
+	if len(protectedAccountIDs) > 0 {
+		updateIDs = make([]int64, 0, len(input.AccountIDs)-len(protectedAccountIDs))
+		for _, accountID := range input.AccountIDs {
+			if _, protected := protectedAccountIDs[accountID]; protected {
+				continue
+			}
+			updateIDs = append(updateIDs, accountID)
+		}
+	}
+
 	// Run bulk update for column/jsonb fields first.
-	if _, err := s.accountRepo.BulkUpdate(ctx, input.AccountIDs, repoUpdates); err != nil {
-		return nil, err
+	if len(updateIDs) > 0 {
+		if _, err := s.accountRepo.BulkUpdate(ctx, updateIDs, repoUpdates); err != nil {
+			return nil, err
+		}
 	}
 
 	// Handle group bindings per account (requires individual operations).
 	for _, accountID := range input.AccountIDs {
 		entry := BulkUpdateAccountResult{AccountID: accountID}
+		if _, protected := protectedAccountIDs[accountID]; protected {
+			entry.Success = false
+			entry.Error = permanentlyDeactivatedAccountError().Error()
+			result.Failed++
+			result.FailedIDs = append(result.FailedIDs, accountID)
+			result.Results = append(result.Results, entry)
+			continue
+		}
 
 		if input.GroupIDs != nil {
 			if err := s.accountRepo.BindGroups(ctx, accountID, *input.GroupIDs); err != nil {
@@ -2828,6 +2908,13 @@ func (s *adminServiceImpl) RefreshAccountCredentials(ctx context.Context, id int
 }
 
 func (s *adminServiceImpl) ClearAccountError(ctx context.Context, id int64) (*Account, error) {
+	account, err := s.accountRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if isPermanentlyDeactivatedAccount(account) {
+		return nil, permanentlyDeactivatedAccountError()
+	}
 	if err := s.accountRepo.ClearError(ctx, id); err != nil {
 		return nil, err
 	}
@@ -2851,6 +2938,15 @@ func (s *adminServiceImpl) SetAccountError(ctx context.Context, id int64, errorM
 }
 
 func (s *adminServiceImpl) SetAccountSchedulable(ctx context.Context, id int64, schedulable bool) (*Account, error) {
+	if schedulable {
+		account, err := s.accountRepo.GetByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if isPermanentlyDeactivatedAccount(account) {
+			return nil, permanentlyDeactivatedAccountError()
+		}
+	}
 	if err := s.accountRepo.SetSchedulable(ctx, id, schedulable); err != nil {
 		return nil, err
 	}

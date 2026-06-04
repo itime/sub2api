@@ -236,7 +236,7 @@
             <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
           </template>
           <template #cell-schedulable="{ row }">
-            <button @click="handleToggleSchedulable(row)" :disabled="togglingSchedulable === row.id" class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800" :class="[row.schedulable ? 'bg-primary-500 hover:bg-primary-600' : 'bg-gray-200 hover:bg-gray-300 dark:bg-dark-600 dark:hover:bg-dark-500']" :title="row.schedulable ? t('admin.accounts.schedulableEnabled') : t('admin.accounts.schedulableDisabled')">
+            <button @click="handleToggleSchedulable(row)" :disabled="togglingSchedulable === row.id || (!row.schedulable && isPermanentlyDeactivatedAccount(row))" class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800" :class="[row.schedulable ? 'bg-primary-500 hover:bg-primary-600' : 'bg-gray-200 hover:bg-gray-300 dark:bg-dark-600 dark:hover:bg-dark-500']" :title="isPermanentlyDeactivatedAccount(row) ? t('admin.accounts.permanentlyDeactivatedHint') : (row.schedulable ? t('admin.accounts.schedulableEnabled') : t('admin.accounts.schedulableDisabled'))">
               <span class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out" :class="[row.schedulable ? 'translate-x-4' : 'translate-x-0']" />
             </button>
           </template>
@@ -342,7 +342,7 @@
     <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
-    <AccountActionMenu :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" />
+    <AccountActionMenu :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" :is-permanently-deactivated="isPermanentlyDeactivatedAccount(menu.acc)" />
     <SyncFromCrsModal :show="showSync" @close="showSync = false" @synced="reload" />
     <ImportDataModal :show="showImportData" @close="showImportData = false" @imported="handleDataImported" />
     <BulkEditAccountModal
@@ -483,6 +483,21 @@ const scheduleModelOptions = ref<SelectOption[]>([])
 const togglingSchedulable = ref<number | null>(null)
 const menu = reactive<{show:boolean, acc:Account|null, pos:{top:number, left:number}|null}>({ show: false, acc: null, pos: null })
 const exportingData = ref(false)
+
+const isPermanentlyDeactivatedAccount = (account: Account | null | undefined) => {
+  if (!account) return false
+  const extra = account.extra as Record<string, unknown> | undefined
+  const reason = typeof extra?.deactivation_reason === 'string' ? extra.deactivation_reason.toLowerCase() : ''
+  return (
+    account.error_message?.toLowerCase().includes('account_deactivated') === true ||
+    extra?.permanent_deactivation === true ||
+    extra?.account_deactivated === true ||
+    reason.includes('account_deactivated')
+  )
+}
+
+const hasSelectedPermanentlyDeactivatedAccount = () =>
+  selIds.value.some(id => isPermanentlyDeactivatedAccount(accounts.value.find(account => account.id === id)))
 
 // Column settings
 const showColumnDropdown = ref(false)
@@ -748,7 +763,6 @@ const {
   params,
   pagination,
   load: baseLoad,
-  reload: baseReload,
   debouncedReload: baseDebouncedReload,
   handlePageChange: baseHandlePageChange,
   handlePageSizeChange: baseHandlePageSizeChange
@@ -827,6 +841,7 @@ const handleStatusTabChange = () => {
   hasPendingListSync.value = false
   resetAutoRefreshCache()
   pendingTodayStatsRefresh.value = true
+  void loadStatusCounts()
   if (pagination.page !== 1) {
     pagination.page = 1
   }
@@ -851,15 +866,15 @@ const load = async () => {
     delete requestParams.lite
   }
   await refreshTodayStatsBatch()
+  await loadStatusCounts()
 }
 
 const reload = async () => {
   hasPendingListSync.value = false
   resetAutoRefreshCache()
   pendingTodayStatsRefresh.value = false
-  await baseReload()
-  await refreshTodayStatsBatch()
-  await loadStatusCounts()
+  pagination.page = 1
+  await load()
 }
 
 const debouncedReload = () => {
@@ -1027,6 +1042,7 @@ const refreshAccountsIncrementally = async () => {
     }
 
     await refreshTodayStatsBatch()
+    void loadStatusCounts()
   } catch (error) {
     console.error('Auto refresh failed:', error)
   } finally {
@@ -1246,6 +1262,10 @@ const toggleSelectAllVisible = (event: Event) => {
 }
 const handleBulkDelete = async () => { if(!confirm(t('common.confirm'))) return; try { await Promise.all(selIds.value.map(id => adminAPI.accounts.delete(id))); clearSelection(); reload() } catch (error) { console.error('Failed to bulk delete accounts:', error) } }
 const handleBulkResetStatus = async () => {
+  if (hasSelectedPermanentlyDeactivatedAccount()) {
+    appStore.showError(t('admin.accounts.permanentlyDeactivatedHint'))
+    return
+  }
   if (!confirm(t('common.confirm'))) return
   try {
     const result = await adminAPI.accounts.batchClearError(selIds.value)
@@ -1262,6 +1282,10 @@ const handleBulkResetStatus = async () => {
   }
 }
 const handleBulkRefreshToken = async () => {
+  if (hasSelectedPermanentlyDeactivatedAccount()) {
+    appStore.showError(t('admin.accounts.permanentlyDeactivatedHint'))
+    return
+  }
   if (!confirm(t('common.confirm'))) return
   try {
     const result = await adminAPI.accounts.batchRefresh(selIds.value)
@@ -1344,6 +1368,10 @@ const normalizeBulkSchedulableResult = (
 }
 const handleBulkToggleSchedulable = async (schedulable: boolean) => {
   const accountIds = [...selIds.value]
+  if (schedulable && hasSelectedPermanentlyDeactivatedAccount()) {
+    appStore.showError(t('admin.accounts.permanentlyDeactivatedHint'))
+    return
+  }
   try {
     const result = await adminAPI.accounts.bulkUpdate(accountIds, { schedulable })
     const { successIds, failedIds, successCount, failedCount, hasIds, hasCounts } = normalizeBulkSchedulableResult(result, accountIds)
@@ -1587,6 +1615,10 @@ const handleSchedule = async (a: Account) => {
 const closeSchedulePanel = () => { showSchedulePanel.value = false; scheduleAcc.value = null; scheduleModelOptions.value = [] }
 const handleReAuth = (a: Account) => { reAuthAcc.value = a; showReAuth.value = true }
 const handleRefresh = async (a: Account) => {
+  if (isPermanentlyDeactivatedAccount(a)) {
+    appStore.showError(t('admin.accounts.permanentlyDeactivatedHint'))
+    return
+  }
   try {
     const updated = await adminAPI.accounts.refreshCredentials(a.id)
     patchAccountInList(updated)
@@ -1596,6 +1628,10 @@ const handleRefresh = async (a: Account) => {
   }
 }
 const handleRecoverState = async (a: Account) => {
+  if (isPermanentlyDeactivatedAccount(a)) {
+    appStore.showError(t('admin.accounts.permanentlyDeactivatedHint'))
+    return
+  }
   try {
     const updated = await adminAPI.accounts.recoverState(a.id)
     patchAccountInList(updated)
@@ -1631,6 +1667,10 @@ const handleDelete = (a: Account) => { deletingAcc.value = a; showDeleteDialog.v
 const confirmDelete = async () => { if(!deletingAcc.value) return; try { await adminAPI.accounts.delete(deletingAcc.value.id); showDeleteDialog.value = false; deletingAcc.value = null; reload() } catch (error) { console.error('Failed to delete account:', error) } }
 const handleToggleSchedulable = async (a: Account) => {
   const nextSchedulable = !a.schedulable
+  if (nextSchedulable && isPermanentlyDeactivatedAccount(a)) {
+    appStore.showError(t('admin.accounts.permanentlyDeactivatedHint'))
+    return
+  }
   togglingSchedulable.value = a.id
   try {
     const updated = await adminAPI.accounts.setSchedulable(a.id, nextSchedulable)
@@ -1712,7 +1752,6 @@ const handleClickOutside = (event: MouseEvent) => {
 
 onMounted(async () => {
   load()
-  void loadStatusCounts()
   try {
     const [p, g] = await Promise.all([adminAPI.proxies.getAll(), adminAPI.groups.getAll()])
     proxies.value = p

@@ -2639,7 +2639,7 @@ export default {
       dataExportFailed: '数据导出失败',
       dataImportTitle: '导入数据',
       dataImportHint: '上传导出的 JSON 文件以批量导入账号与代理。',
-      dataImportWarning: '导入将创建新账号与代理，分组需手工绑定；请确认已有数据不会冲突。',
+      dataImportWarning: '导入将创建新账号与代理，或更新相同平台、类型、邮箱的已有账号；请确认已有数据不会冲突。',
       dataImportFile: '数据文件',
       dataImportSelectedFiles: '已选择 {count} 个文件',
       dataImportButton: '开始导入',
@@ -2648,9 +2648,9 @@ export default {
       dataImportParseFailed: '数据解析失败',
       dataImportFailed: '数据导入失败',
       dataImportResult: '导入结果',
-      dataImportResultSummary: '代理创建 {proxy_created}，复用 {proxy_reused}，失败 {proxy_failed}；账号创建 {account_created}，失败 {account_failed}',
+      dataImportResultSummary: '代理创建 {proxy_created}，复用 {proxy_reused}，失败 {proxy_failed}；账号创建 {account_created}，更新 {account_updated}，失败 {account_failed}',
       dataImportErrors: '失败详情',
-      dataImportSuccess: '导入完成：账号 {account_created}，失败 {account_failed}',
+      dataImportSuccess: '导入完成：账号创建 {account_created}，更新 {account_updated}，失败 {account_failed}',
       dataImportCompletedWithErrors: '导入完成但有错误：账号失败 {account_failed}，代理失败 {proxy_failed}',
       syncFromCrsTitle: '从 CRS 同步账号',
       syncFromCrsDesc:
@@ -2708,6 +2708,7 @@ export default {
       schedulableHint: '开启后账号参与API请求调度',
       schedulableEnabled: '调度已开启',
       schedulableDisabled: '调度已关闭',
+      permanentlyDeactivatedHint: '该账号已被永久停用，不能恢复为正常或重新启用调度。',
       failedToToggleSchedulable: '切换调度状态失败',
       groupCountTotal: '共 {count} 个分组',
       columns: {

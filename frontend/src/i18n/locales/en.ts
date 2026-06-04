@@ -2563,7 +2563,7 @@ export default {
       dataExportFailed: 'Failed to export data',
       dataImportTitle: 'Import Data',
       dataImportHint: 'Upload the exported JSON file to import accounts and proxies.',
-      dataImportWarning: 'Import will create new accounts/proxies; groups must be bound manually. Ensure existing data does not conflict.',
+      dataImportWarning: 'Import will create new accounts/proxies or update existing accounts with the same platform, type, and email. Ensure existing data does not conflict.',
       dataImportFile: 'Data file',
       dataImportSelectedFiles: '{count} files selected',
       dataImportButton: 'Start Import',
@@ -2572,9 +2572,9 @@ export default {
       dataImportParseFailed: 'Failed to parse data file',
       dataImportFailed: 'Data import failed',
       dataImportResult: 'Import Result',
-      dataImportResultSummary: 'Proxies created {proxy_created}, reused {proxy_reused}, failed {proxy_failed}; Accounts created {account_created}, failed {account_failed}',
+      dataImportResultSummary: 'Proxies created {proxy_created}, reused {proxy_reused}, failed {proxy_failed}; Accounts created {account_created}, updated {account_updated}, failed {account_failed}',
       dataImportErrors: 'Error Details',
-      dataImportSuccess: 'Import completed: accounts {account_created}, failed {account_failed}',
+      dataImportSuccess: 'Import completed: accounts created {account_created}, updated {account_updated}, failed {account_failed}',
       dataImportCompletedWithErrors: 'Import completed with errors: account failed {account_failed}, proxy failed {proxy_failed}',
       syncFromCrsTitle: 'Sync Accounts from CRS',
       syncFromCrsDesc:
@@ -2631,6 +2631,7 @@ export default {
       schedulableHint: 'Enable to include this account in API request scheduling',
       schedulableEnabled: 'Scheduling enabled',
       schedulableDisabled: 'Scheduling disabled',
+      permanentlyDeactivatedHint: 'This account is permanently deactivated and cannot be reactivated.',
       failedToToggleSchedulable: 'Failed to toggle scheduling status',
       groupCountTotal: '{count} groups total',
       platforms: {

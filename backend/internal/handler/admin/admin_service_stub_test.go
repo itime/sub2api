@@ -20,6 +20,13 @@ type stubAdminService struct {
 	boundAuthIdentity    *service.AdminBindAuthIdentityInput
 	boundAuthIdentityFor int64
 	createdAccounts      []*service.CreateAccountInput
+	updatedAccounts      []*service.UpdateAccountInput
+	updatedAccountIDs    []int64
+	clearedErrorIDs      []int64
+	schedulableUpdates   []struct {
+		id          int64
+		schedulable bool
+	}
 	createdProxies       []*service.CreateProxyInput
 	updatedProxyIDs      []int64
 	updatedProxies       []*service.UpdateProxyInput
@@ -338,10 +345,23 @@ func (s *stubAdminService) CreateAccount(ctx context.Context, input *service.Cre
 }
 
 func (s *stubAdminService) UpdateAccount(ctx context.Context, id int64, input *service.UpdateAccountInput) (*service.Account, error) {
+	s.mu.Lock()
+	s.updatedAccountIDs = append(s.updatedAccountIDs, id)
+	s.updatedAccounts = append(s.updatedAccounts, input)
+	s.mu.Unlock()
 	if s.updateAccountErr != nil {
 		return nil, s.updateAccountErr
 	}
-	account := service.Account{ID: id, Name: input.Name, Status: service.StatusActive}
+	account := service.Account{ID: id, Name: input.Name, Type: input.Type, Status: service.StatusActive}
+	for i := range s.accounts {
+		if s.accounts[i].ID == id {
+			account.Platform = s.accounts[i].Platform
+			if account.Type == "" {
+				account.Type = s.accounts[i].Type
+			}
+			break
+		}
+	}
 	return &account, nil
 }
 
@@ -355,6 +375,9 @@ func (s *stubAdminService) RefreshAccountCredentials(ctx context.Context, id int
 }
 
 func (s *stubAdminService) ClearAccountError(ctx context.Context, id int64) (*service.Account, error) {
+	s.mu.Lock()
+	s.clearedErrorIDs = append(s.clearedErrorIDs, id)
+	s.mu.Unlock()
 	account := service.Account{ID: id, Name: "account", Status: service.StatusActive}
 	return &account, nil
 }
@@ -364,6 +387,12 @@ func (s *stubAdminService) SetAccountError(ctx context.Context, id int64, errorM
 }
 
 func (s *stubAdminService) SetAccountSchedulable(ctx context.Context, id int64, schedulable bool) (*service.Account, error) {
+	s.mu.Lock()
+	s.schedulableUpdates = append(s.schedulableUpdates, struct {
+		id          int64
+		schedulable bool
+	}{id: id, schedulable: schedulable})
+	s.mu.Unlock()
 	account := service.Account{ID: id, Name: "account", Status: service.StatusActive, Schedulable: schedulable}
 	return &account, nil
 }

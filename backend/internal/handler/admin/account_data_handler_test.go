@@ -17,6 +17,11 @@ type dataResponse struct {
 	Data dataPayload `json:"data"`
 }
 
+type dataImportResponse struct {
+	Code int              `json:"code"`
+	Data DataImportResult `json:"data"`
+}
+
 type dataPayload struct {
 	Type     string        `json:"type"`
 	Version  int           `json:"version"`
@@ -334,4 +339,93 @@ func TestImportDataReusesProxyByNameKeyAndBindsGroups(t *testing.T) {
 	require.Equal(t, int64(1), *adminSvc.createdAccounts[0].ProxyID)
 	require.Equal(t, []int64{7}, adminSvc.createdAccounts[0].GroupIDs)
 	require.True(t, adminSvc.createdAccounts[0].SkipDefaultGroupBind)
+}
+
+func TestImportDataUpdatesExistingOpenAIOAuthByEmail(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+
+	oldProxyID := int64(1)
+	newProxyID := int64(2)
+	adminSvc.proxies = []service.Proxy{
+		{
+			ID:       newProxyID,
+			Name:     "new-proxy",
+			Protocol: "http",
+			Host:     "127.0.0.1",
+			Port:     6152,
+			Status:   service.StatusActive,
+		},
+	}
+	adminSvc.accounts = []service.Account{
+		{
+			ID:           42,
+			Name:         "user@example.com",
+			Platform:     service.PlatformOpenAI,
+			Type:         service.AccountTypeOAuth,
+			Status:       "error",
+			Schedulable:  false,
+			ErrorMessage: "Token revoked",
+			Credentials:  map[string]any{"email": "user@example.com", "access_token": "old"},
+			Extra:        map[string]any{"email": "user@example.com"},
+			ProxyID:      &oldProxyID,
+			Concurrency:  1,
+			Priority:     10,
+		},
+	}
+
+	dataPayload := map[string]any{
+		"data": map[string]any{
+			"type":    dataType,
+			"version": dataVersion,
+			"proxies": []map[string]any{
+				{
+					"proxy_key": "name|new-proxy",
+					"name":      "new-proxy",
+					"protocol":  "http",
+					"host":      "127.0.0.1",
+					"port":      6152,
+					"status":    "active",
+				},
+			},
+			"accounts": []map[string]any{
+				{
+					"name":        "user@example.com",
+					"platform":    service.PlatformOpenAI,
+					"type":        service.AccountTypeOAuth,
+					"credentials": map[string]any{"email": "user@example.com", "access_token": "new"},
+					"extra":       map[string]any{"email": "user@example.com", "source": "openai-free"},
+					"proxy_key":   "name|new-proxy",
+					"group_ids":   []int64{7},
+					"concurrency": 3,
+					"priority":    50,
+				},
+			},
+		},
+		"skip_default_group_bind": true,
+	}
+
+	body, _ := json.Marshal(dataPayload)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/data", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp dataImportResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, 0, resp.Code)
+	require.Equal(t, 0, resp.Data.AccountCreated)
+	require.Equal(t, 1, resp.Data.AccountUpdated)
+	require.Len(t, adminSvc.createdAccounts, 0)
+	require.Equal(t, []int64{42}, adminSvc.updatedAccountIDs)
+	require.Len(t, adminSvc.updatedAccounts, 1)
+	require.Equal(t, service.StatusActive, adminSvc.updatedAccounts[0].Status)
+	require.Equal(t, "new", adminSvc.updatedAccounts[0].Credentials["access_token"])
+	require.Equal(t, []int64{7}, *adminSvc.updatedAccounts[0].GroupIDs)
+	require.NotNil(t, adminSvc.updatedAccounts[0].ProxyID)
+	require.Equal(t, newProxyID, *adminSvc.updatedAccounts[0].ProxyID)
+	require.Equal(t, []int64{42}, adminSvc.clearedErrorIDs)
+	require.Len(t, adminSvc.schedulableUpdates, 1)
+	require.Equal(t, int64(42), adminSvc.schedulableUpdates[0].id)
+	require.True(t, adminSvc.schedulableUpdates[0].schedulable)
 }

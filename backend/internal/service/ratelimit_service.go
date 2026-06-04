@@ -1377,6 +1377,9 @@ func (s *RateLimitService) RecoverAccountState(ctx context.Context, accountID in
 	if err != nil {
 		return nil, err
 	}
+	if isPermanentlyDeactivatedAccount(account) {
+		return nil, permanentlyDeactivatedAccountError()
+	}
 
 	result := &SuccessfulTestRecoveryResult{}
 	if account.Status == StatusError {
