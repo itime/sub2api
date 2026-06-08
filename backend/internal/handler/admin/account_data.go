@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"log/slog"
@@ -15,13 +16,15 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
 	dataType       = "sub2api-data"
 	legacyDataType = "sub2api-bundle"
 	dataVersion    = 1
-	dataPageCap    = 1000
+	dataPageCap              = 1000
+	fastImportMaxConcurrency = 30
 )
 
 type DataPayload struct {
@@ -71,16 +74,33 @@ type DataAccount struct {
 type DataImportRequest struct {
 	Data                 DataPayload `json:"data"`
 	SkipDefaultGroupBind *bool       `json:"skip_default_group_bind"`
+	FastImport           *bool       `json:"fast_import"`
+	DefaultProxyID       *int64      `json:"default_proxy_id,omitempty"`
+	DefaultGroupIDs      []int64     `json:"default_group_ids,omitempty"`
 }
 
 type DataImportResult struct {
-	ProxyCreated   int               `json:"proxy_created"`
-	ProxyReused    int               `json:"proxy_reused"`
-	ProxyFailed    int               `json:"proxy_failed"`
-	AccountCreated int               `json:"account_created"`
-	AccountUpdated int               `json:"account_updated"`
-	AccountFailed  int               `json:"account_failed"`
-	Errors         []DataImportError `json:"errors,omitempty"`
+	ProxiesReceived int               `json:"proxies_received"`
+	AccountsReceived int               `json:"accounts_received"`
+	ProxyCreated    int               `json:"proxy_created"`
+	ProxyReused     int               `json:"proxy_reused"`
+	ProxySkipped    int               `json:"proxy_skipped"`
+	ProxyFailed     int               `json:"proxy_failed"`
+	AccountCreated  int               `json:"account_created"`
+	AccountUpdated  int               `json:"account_updated"`
+	AccountSkipped  int               `json:"account_skipped"`
+	AccountFailed      int               `json:"account_failed"`
+	CreatedAccountIDs  []int64           `json:"created_account_ids,omitempty"`
+	Items              []DataImportItem  `json:"items,omitempty"`
+	Errors             []DataImportError `json:"errors,omitempty"`
+}
+
+type DataImportItem struct {
+	Kind     string `json:"kind"`
+	Name     string `json:"name,omitempty"`
+	Action   string `json:"action"`
+	Message  string `json:"message,omitempty"`
+	ProxyKey string `json:"proxy_key,omitempty"`
 }
 
 type DataImportError struct {
@@ -206,9 +226,13 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 	if req.SkipDefaultGroupBind != nil {
 		skipDefaultGroupBind = *req.SkipDefaultGroupBind
 	}
+	fastImport := req.FastImport != nil && *req.FastImport
 
 	dataPayload := req.Data
-	result := DataImportResult{}
+	result := DataImportResult{
+		ProxiesReceived:  len(dataPayload.Proxies),
+		AccountsReceived: len(dataPayload.Accounts),
+	}
 
 	existingProxies, err := h.listAllProxies(ctx)
 	if err != nil {
@@ -236,7 +260,7 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 		}
 		if err := validateDataProxy(item); err != nil {
 			result.ProxyFailed++
-			result.Errors = append(result.Errors, DataImportError{
+			recordImportError(&result, DataImportError{
 				Kind:     "proxy",
 				Name:     item.Name,
 				ProxyKey: key,
@@ -248,6 +272,13 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 		if existingID, ok := proxyKeyToID[key]; ok {
 			registerImportedProxyKeys(proxyKeyToID, proxyNameToID, item, key, existingID)
 			result.ProxyReused++
+			recordImportItem(&result, DataImportItem{
+				Kind:     "proxy",
+				Name:     item.Name,
+				Action:   "reused",
+				ProxyKey: key,
+				Message:  "matched existing proxy",
+			})
 			if normalizedStatus != "" {
 				if proxy, getErr := h.adminService.GetProxy(ctx, existingID); getErr == nil && proxy != nil && proxy.Status != normalizedStatus {
 					_, _ = h.adminService.UpdateProxy(ctx, existingID, &service.UpdateProxyInput{
@@ -260,6 +291,13 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 		if existingID, ok := proxyNameToID[normalizeProxyNameKey(item.Name)]; ok {
 			registerImportedProxyKeys(proxyKeyToID, proxyNameToID, item, key, existingID)
 			result.ProxyReused++
+			recordImportItem(&result, DataImportItem{
+				Kind:     "proxy",
+				Name:     item.Name,
+				Action:   "reused",
+				ProxyKey: key,
+				Message:  "matched existing proxy by name",
+			})
 			if normalizedStatus != "" {
 				if proxy, getErr := h.adminService.GetProxy(ctx, existingID); getErr == nil && proxy != nil && proxy.Status != normalizedStatus {
 					_, _ = h.adminService.UpdateProxy(ctx, existingID, &service.UpdateProxyInput{
@@ -280,7 +318,7 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 		})
 		if createErr != nil {
 			result.ProxyFailed++
-			result.Errors = append(result.Errors, DataImportError{
+			recordImportError(&result, DataImportError{
 				Kind:     "proxy",
 				Name:     item.Name,
 				ProxyKey: key,
@@ -290,6 +328,12 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 		}
 		registerImportedProxyKeys(proxyKeyToID, proxyNameToID, item, key, created.ID)
 		result.ProxyCreated++
+		recordImportItem(&result, DataImportItem{
+			Kind:     "proxy",
+			Name:     item.Name,
+			Action:   "created",
+			ProxyKey: key,
+		})
 
 		if normalizedStatus != "" && normalizedStatus != created.Status {
 			_, _ = h.adminService.UpdateProxy(ctx, created.ID, &service.UpdateProxyInput{
@@ -301,127 +345,19 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 	// 收集需要异步设置隐私的 Antigravity OAuth 账号
 	var privacyAccounts []*service.Account
 
-	for i := range dataPayload.Accounts {
-		item := dataPayload.Accounts[i]
-		if err := validateDataAccount(item); err != nil {
-			result.AccountFailed++
-			result.Errors = append(result.Errors, DataImportError{
-				Kind:    "account",
-				Name:    item.Name,
-				Message: err.Error(),
-			})
-			continue
+	var emailIndex map[importAccountKey]map[string]service.Account
+	if !fastImport {
+		var indexErr error
+		emailIndex, indexErr = h.buildImportAccountEmailIndex(ctx, dataPayload.Accounts)
+		if indexErr != nil {
+			return result, indexErr
 		}
+	}
 
-		var proxyID *int64
-		if item.ProxyKey != nil && *item.ProxyKey != "" {
-			if id, ok := proxyKeyToID[*item.ProxyKey]; ok {
-				proxyID = &id
-			} else {
-				result.AccountFailed++
-				result.Errors = append(result.Errors, DataImportError{
-					Kind:     "account",
-					Name:     item.Name,
-					ProxyKey: *item.ProxyKey,
-					Message:  "proxy_key not found",
-				})
-				continue
-			}
-		}
-
-		enrichCredentialsFromIDToken(&item)
-
-		existingAccount, err := h.findImportAccountForUpdate(ctx, item)
-		if err != nil {
-			result.AccountFailed++
-			result.Errors = append(result.Errors, DataImportError{
-				Kind:    "account",
-				Name:    item.Name,
-				Message: err.Error(),
-			})
-			continue
-		}
-		if existingAccount != nil {
-			concurrency := item.Concurrency
-			priority := item.Priority
-			updateInput := &service.UpdateAccountInput{
-				Name:                  item.Name,
-				Notes:                 item.Notes,
-				Type:                  item.Type,
-				Credentials:           item.Credentials,
-				Extra:                 item.Extra,
-				ProxyID:               normalizeImportedProxyID(proxyID, item.ProxyKey != nil),
-				Concurrency:           &concurrency,
-				Priority:              &priority,
-				RateMultiplier:        item.RateMultiplier,
-				GroupIDs:              &item.GroupIDs,
-				ExpiresAt:             item.ExpiresAt,
-				AutoPauseOnExpired:    item.AutoPauseOnExpired,
-				Status:                service.StatusActive,
-				SkipMixedChannelCheck: true,
-			}
-			updated, updateErr := h.adminService.UpdateAccount(ctx, existingAccount.ID, updateInput)
-			if updateErr != nil {
-				result.AccountFailed++
-				result.Errors = append(result.Errors, DataImportError{
-					Kind:    "account",
-					Name:    item.Name,
-					Message: updateErr.Error(),
-				})
-				continue
-			}
-			if _, clearErr := h.adminService.ClearAccountError(ctx, existingAccount.ID); clearErr != nil {
-				slog.Warn("import_account_clear_error_failed", "account_id", existingAccount.ID, "error", clearErr)
-			}
-			if _, schedErr := h.adminService.SetAccountSchedulable(ctx, existingAccount.ID, true); schedErr != nil {
-				result.AccountFailed++
-				result.Errors = append(result.Errors, DataImportError{
-					Kind:    "account",
-					Name:    item.Name,
-					Message: schedErr.Error(),
-				})
-				continue
-			}
-			if updated.Platform == service.PlatformAntigravity && updated.Type == service.AccountTypeOAuth {
-				privacyAccounts = append(privacyAccounts, updated)
-			}
-			result.AccountUpdated++
-			continue
-		}
-
-		accountInput := &service.CreateAccountInput{
-			Name:                 item.Name,
-			Notes:                item.Notes,
-			Platform:             item.Platform,
-			Type:                 item.Type,
-			Credentials:          item.Credentials,
-			Extra:                item.Extra,
-			ProxyID:              proxyID,
-			Concurrency:          item.Concurrency,
-			Priority:             item.Priority,
-			RateMultiplier:       item.RateMultiplier,
-			GroupIDs:             item.GroupIDs,
-			ExpiresAt:            item.ExpiresAt,
-			AutoPauseOnExpired:   item.AutoPauseOnExpired,
-			SkipDefaultGroupBind: skipDefaultGroupBind,
-			CreatedAt:            parseDataAccountCreatedAt(item.CreatedAt),
-		}
-
-		created, err := h.adminService.CreateAccount(ctx, accountInput)
-		if err != nil {
-			result.AccountFailed++
-			result.Errors = append(result.Errors, DataImportError{
-				Kind:    "account",
-				Name:    item.Name,
-				Message: err.Error(),
-			})
-			continue
-		}
-		// 收集 Antigravity OAuth 账号，稍后异步设置隐私
-		if created.Platform == service.PlatformAntigravity && created.Type == service.AccountTypeOAuth {
-			privacyAccounts = append(privacyAccounts, created)
-		}
-		result.AccountCreated++
+	if fastImport {
+		h.importAccountsFastConcurrent(ctx, req, dataPayload.Accounts, proxyKeyToID, skipDefaultGroupBind, &result, &privacyAccounts)
+	} else {
+		h.importAccountsSequential(ctx, req, dataPayload.Accounts, proxyKeyToID, skipDefaultGroupBind, emailIndex, &result, &privacyAccounts)
 	}
 
 	// 异步设置 Antigravity 隐私，避免大量导入时阻塞请求
@@ -444,6 +380,227 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 	return result, nil
 }
 
+func (h *AccountHandler) importAccountsSequential(
+	ctx context.Context,
+	req DataImportRequest,
+	accounts []DataAccount,
+	proxyKeyToID map[string]int64,
+	skipDefaultGroupBind bool,
+	emailIndex map[importAccountKey]map[string]service.Account,
+	result *DataImportResult,
+	privacyAccounts *[]*service.Account,
+) {
+	for i := range accounts {
+		item := accounts[i]
+		normalizeImportAccount(&item)
+		if err := validateDataAccount(item); err != nil {
+			result.AccountFailed++
+			recordImportError(result, DataImportError{
+				Kind:    "account",
+				Name:    item.Name,
+				Message: err.Error(),
+			})
+			continue
+		}
+
+		proxyID, proxyErr := resolveImportAccountProxyID(item, proxyKeyToID, req.DefaultProxyID)
+		if proxyErr != nil {
+			result.AccountFailed++
+			recordImportError(result, DataImportError{
+				Kind:     "account",
+				Name:     item.Name,
+				ProxyKey: proxyErr.proxyKey,
+				Message:  proxyErr.message,
+			})
+			continue
+		}
+
+		groupIDs := resolveImportAccountGroupIDs(item.GroupIDs, req.DefaultGroupIDs)
+		enrichCredentialsFromIDToken(&item)
+
+		existingAccount := lookupImportAccountForUpdate(emailIndex, item)
+		if existingAccount != nil {
+			concurrency := item.Concurrency
+			priority := item.Priority
+			updateInput := &service.UpdateAccountInput{
+				Name:                  item.Name,
+				Notes:                 item.Notes,
+				Type:                  item.Type,
+				Credentials:           item.Credentials,
+				Extra:                 item.Extra,
+				ProxyID:               normalizeImportedProxyID(proxyID, item.ProxyKey != nil),
+				Concurrency:           &concurrency,
+				Priority:              &priority,
+				RateMultiplier:        item.RateMultiplier,
+				GroupIDs:              &groupIDs,
+				ExpiresAt:             item.ExpiresAt,
+				AutoPauseOnExpired:    item.AutoPauseOnExpired,
+				Status:                service.StatusActive,
+				SkipMixedChannelCheck: true,
+			}
+			updated, updateErr := h.adminService.UpdateAccount(ctx, existingAccount.ID, updateInput)
+			if updateErr != nil {
+				result.AccountFailed++
+				recordImportError(result, DataImportError{
+					Kind:    "account",
+					Name:    item.Name,
+					Message: updateErr.Error(),
+				})
+				continue
+			}
+			if _, clearErr := h.adminService.ClearAccountError(ctx, existingAccount.ID); clearErr != nil {
+				slog.Warn("import_account_clear_error_failed", "account_id", existingAccount.ID, "error", clearErr)
+			}
+			if _, schedErr := h.adminService.SetAccountSchedulable(ctx, existingAccount.ID, true); schedErr != nil {
+				result.AccountFailed++
+				recordImportError(result, DataImportError{
+					Kind:    "account",
+					Name:    item.Name,
+					Message: schedErr.Error(),
+				})
+				continue
+			}
+			if updated.Platform == service.PlatformAntigravity && updated.Type == service.AccountTypeOAuth {
+				*privacyAccounts = append(*privacyAccounts, updated)
+			}
+			result.AccountUpdated++
+			recordImportItem(result, DataImportItem{
+				Kind:    "account",
+				Name:    item.Name,
+				Action:  "updated",
+				Message: "matched existing account by email",
+			})
+			continue
+		}
+
+		created, err := h.createImportedAccount(ctx, item, proxyID, groupIDs, skipDefaultGroupBind)
+		if err != nil {
+			result.AccountFailed++
+			recordImportError(result, DataImportError{
+				Kind:    "account",
+				Name:    item.Name,
+				Message: err.Error(),
+			})
+			continue
+		}
+		if created.Platform == service.PlatformAntigravity && created.Type == service.AccountTypeOAuth {
+			*privacyAccounts = append(*privacyAccounts, created)
+		}
+		result.AccountCreated++
+		result.CreatedAccountIDs = append(result.CreatedAccountIDs, created.ID)
+		recordImportItem(result, DataImportItem{
+			Kind:   "account",
+			Name:   item.Name,
+			Action: "created",
+		})
+	}
+}
+
+func (h *AccountHandler) createImportedAccount(
+	ctx context.Context,
+	item DataAccount,
+	proxyID *int64,
+	groupIDs []int64,
+	skipDefaultGroupBind bool,
+) (*service.Account, error) {
+	accountInput := &service.CreateAccountInput{
+		Name:                 item.Name,
+		Notes:                item.Notes,
+		Platform:             item.Platform,
+		Type:                 item.Type,
+		Credentials:          item.Credentials,
+		Extra:                item.Extra,
+		ProxyID:              proxyID,
+		Concurrency:          item.Concurrency,
+		Priority:             item.Priority,
+		RateMultiplier:       item.RateMultiplier,
+		GroupIDs:             groupIDs,
+		ExpiresAt:            item.ExpiresAt,
+		AutoPauseOnExpired:   item.AutoPauseOnExpired,
+		SkipDefaultGroupBind: skipDefaultGroupBind,
+		CreatedAt:            parseDataAccountCreatedAt(item.CreatedAt),
+	}
+	return h.adminService.CreateAccount(ctx, accountInput)
+}
+
+func (h *AccountHandler) importAccountsFastConcurrent(
+	ctx context.Context,
+	req DataImportRequest,
+	accounts []DataAccount,
+	proxyKeyToID map[string]int64,
+	skipDefaultGroupBind bool,
+	result *DataImportResult,
+	privacyAccounts *[]*service.Account,
+) {
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(fastImportMaxConcurrency)
+
+	var mu sync.Mutex
+	for i := range accounts {
+		idx := i
+		g.Go(func() error {
+			item := accounts[idx]
+			normalizeImportAccount(&item)
+			if err := validateDataAccount(item); err != nil {
+				mu.Lock()
+				result.AccountFailed++
+				recordImportError(result, DataImportError{
+					Kind:    "account",
+					Name:    item.Name,
+					Message: err.Error(),
+				})
+				mu.Unlock()
+				return nil
+			}
+
+			proxyID, proxyErr := resolveImportAccountProxyID(item, proxyKeyToID, req.DefaultProxyID)
+			if proxyErr != nil {
+				mu.Lock()
+				result.AccountFailed++
+				recordImportError(result, DataImportError{
+					Kind:     "account",
+					Name:     item.Name,
+					ProxyKey: proxyErr.proxyKey,
+					Message:  proxyErr.message,
+				})
+				mu.Unlock()
+				return nil
+			}
+
+			groupIDs := resolveImportAccountGroupIDs(item.GroupIDs, req.DefaultGroupIDs)
+			enrichCredentialsFromIDToken(&item)
+
+			created, err := h.createImportedAccount(gctx, item, proxyID, groupIDs, skipDefaultGroupBind)
+			if err != nil {
+				mu.Lock()
+				result.AccountFailed++
+				recordImportError(result, DataImportError{
+					Kind:    "account",
+					Name:    item.Name,
+					Message: err.Error(),
+				})
+				mu.Unlock()
+				return nil
+			}
+
+			mu.Lock()
+			if created.Platform == service.PlatformAntigravity && created.Type == service.AccountTypeOAuth {
+				*privacyAccounts = append(*privacyAccounts, created)
+			}
+			result.AccountCreated++
+			result.CreatedAccountIDs = append(result.CreatedAccountIDs, created.ID)
+			recordImportItem(result, DataImportItem{
+				Kind:   "account",
+				Name:   item.Name,
+				Action: "created",
+			})
+			mu.Unlock()
+			return nil
+		})
+	}
+	_ = g.Wait()
+}
+
 func normalizeImportedProxyID(proxyID *int64, explicit bool) *int64 {
 	if proxyID != nil {
 		return proxyID
@@ -455,22 +612,71 @@ func normalizeImportedProxyID(proxyID *int64, explicit bool) *int64 {
 	return &zero
 }
 
-func (h *AccountHandler) findImportAccountForUpdate(ctx context.Context, item DataAccount) (*service.Account, error) {
-	email := importAccountEmail(item)
-	if email == "" {
-		return nil, nil
+type importAccountKey struct {
+	platform    string
+	accountType string
+}
+
+func (h *AccountHandler) buildImportAccountEmailIndex(ctx context.Context, items []DataAccount) (map[importAccountKey]map[string]service.Account, error) {
+	needed := make(map[importAccountKey]struct{})
+	for i := range items {
+		key := importAccountKey{
+			platform:    strings.TrimSpace(items[i].Platform),
+			accountType: strings.TrimSpace(items[i].Type),
+		}
+		if key.platform == "" || key.accountType == "" {
+			continue
+		}
+		needed[key] = struct{}{}
 	}
 
-	accounts, err := h.listAccountsFiltered(ctx, item.Platform, item.Type, "", "", 0, "", "created_at", "desc")
+	index := make(map[importAccountKey]map[string]service.Account, len(needed))
+	for key := range needed {
+		accounts, err := h.listAccountsFiltered(ctx, key.platform, key.accountType, "", "", 0, "", "created_at", "desc")
+		if err != nil {
+			return nil, err
+		}
+		byEmail := make(map[string]service.Account, len(accounts))
+		for i := range accounts {
+			email := importExistingAccountEmail(accounts[i])
+			if email == "" {
+				continue
+			}
+			if _, exists := byEmail[email]; !exists {
+				byEmail[email] = accounts[i]
+			}
+		}
+		index[key] = byEmail
+	}
+	return index, nil
+}
+
+func lookupImportAccountForUpdate(index map[importAccountKey]map[string]service.Account, item DataAccount) *service.Account {
+	email := importAccountEmail(item)
+	if email == "" {
+		return nil
+	}
+	key := importAccountKey{
+		platform:    strings.TrimSpace(item.Platform),
+		accountType: strings.TrimSpace(item.Type),
+	}
+	byEmail, ok := index[key]
+	if !ok {
+		return nil
+	}
+	account, ok := byEmail[email]
+	if !ok {
+		return nil
+	}
+	return &account
+}
+
+func (h *AccountHandler) findImportAccountForUpdate(ctx context.Context, item DataAccount) (*service.Account, error) {
+	index, err := h.buildImportAccountEmailIndex(ctx, []DataAccount{item})
 	if err != nil {
 		return nil, err
 	}
-	for i := range accounts {
-		if importExistingAccountEmail(accounts[i]) == email {
-			return &accounts[i], nil
-		}
-	}
-	return nil, nil
+	return lookupImportAccountForUpdate(index, item), nil
 }
 
 func importAccountEmail(item DataAccount) string {
@@ -662,6 +868,58 @@ func parseIncludeProxies(c *gin.Context) (bool, error) {
 	}
 }
 
+type importProxyResolveError struct {
+	proxyKey string
+	message  string
+}
+
+func recordImportItem(result *DataImportResult, item DataImportItem) {
+	result.Items = append(result.Items, item)
+}
+
+func recordImportError(result *DataImportResult, err DataImportError) {
+	result.Errors = append(result.Errors, err)
+	recordImportItem(result, DataImportItem{
+		Kind:     err.Kind,
+		Name:     err.Name,
+		Action:   "failed",
+		ProxyKey: err.ProxyKey,
+		Message:  err.Message,
+	})
+}
+
+func resolveImportAccountGroupIDs(itemGroupIDs, defaultGroupIDs []int64) []int64 {
+	if len(itemGroupIDs) > 0 {
+		return append([]int64(nil), itemGroupIDs...)
+	}
+	if len(defaultGroupIDs) == 0 {
+		return nil
+	}
+	return append([]int64(nil), defaultGroupIDs...)
+}
+
+func resolveImportAccountProxyID(
+	item DataAccount,
+	proxyKeyToID map[string]int64,
+	defaultProxyID *int64,
+) (*int64, *importProxyResolveError) {
+	if item.ProxyKey != nil && strings.TrimSpace(*item.ProxyKey) != "" {
+		key := strings.TrimSpace(*item.ProxyKey)
+		if id, ok := proxyKeyToID[key]; ok {
+			return &id, nil
+		}
+		return nil, &importProxyResolveError{
+			proxyKey: key,
+			message:  "proxy_key not found in import payload or existing proxies",
+		}
+	}
+	if defaultProxyID != nil && *defaultProxyID > 0 {
+		id := *defaultProxyID
+		return &id, nil
+	}
+	return nil, nil
+}
+
 func validateDataHeader(payload DataPayload) error {
 	if payload.Type != "" && payload.Type != dataType && payload.Type != legacyDataType {
 		return fmt.Errorf("unsupported data type: %s", payload.Type)
@@ -700,6 +958,27 @@ func validateDataProxy(item DataProxy) error {
 		}
 	}
 	return nil
+}
+
+// normalizeImportAccount maps external export formats (CPA / Codex CLI session JSON)
+// into sub2api's canonical OpenAI OAuth account shape.
+func normalizeImportAccount(item *DataAccount) {
+	if item == nil {
+		return
+	}
+	applyCPAImportNormalizations(item)
+	if strings.EqualFold(strings.TrimSpace(item.Type), "codex") {
+		item.Type = service.AccountTypeOAuth
+		if strings.TrimSpace(item.Platform) == "" {
+			item.Platform = service.PlatformOpenAI
+		}
+		if item.Extra == nil {
+			item.Extra = map[string]any{}
+		}
+		if _, ok := item.Extra["import_source"]; !ok {
+			item.Extra["import_source"] = "codex_session"
+		}
+	}
 }
 
 func validateDataAccount(item DataAccount) error {

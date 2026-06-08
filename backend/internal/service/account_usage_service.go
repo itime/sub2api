@@ -919,52 +919,54 @@ func enrichUsageWithAccountError(info *UsageInfo, account *Account) {
 	info.NeedsReauth = false
 }
 
-// addWindowStats 为 usage 数据添加窗口期统计
-// 使用独立缓存（1 分钟），与 API 缓存分离
+func (s *AccountUsageService) attachWindowStats(
+	ctx context.Context,
+	accountID int64,
+	progress *UsageProgress,
+	startTime time.Time,
+) {
+	if s == nil || s.usageLogRepo == nil || accountID <= 0 || progress == nil {
+		return
+	}
+	stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, accountID, startTime)
+	if err != nil {
+		log.Printf("Failed to get window stats for account %d: %v", accountID, err)
+		return
+	}
+	progress.WindowStats = windowStatsFromAccountStats(stats)
+}
+
+// addWindowStats 为各用量窗口附加请求数 / token / 费用统计（按各自窗口起点聚合）。
 func (s *AccountUsageService) addWindowStats(ctx context.Context, account *Account, usage *UsageInfo) {
-	// 修复：即使 FiveHour 为 nil，也要尝试获取统计数据
-	// 因为 SevenDay/SevenDaySonnet 可能需要
+	if usage == nil || account == nil {
+		return
+	}
 	if usage.FiveHour == nil && usage.SevenDay == nil && usage.SevenDaySonnet == nil {
 		return
 	}
-
-	// 检查窗口统计缓存（1 分钟）
-	var windowStats *WindowStats
-	if cached, ok := s.cache.windowStatsCache.Load(account.ID); ok {
-		if cache, ok := cached.(*windowStatsCache); ok && time.Since(cache.timestamp) < windowStatsCacheTTL {
-			windowStats = cache.stats
-		}
+	if s.usageLogRepo == nil {
+		return
 	}
 
-	// 如果没有缓存，从数据库查询
-	if windowStats == nil {
-		// 使用统一的窗口开始时间计算逻辑（考虑窗口过期情况）
-		startTime := account.GetCurrentWindowStartTime()
-
-		stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, startTime)
-		if err != nil {
-			log.Printf("Failed to get window stats for account %d: %v", account.ID, err)
-			return
-		}
-
-		windowStats = &WindowStats{
-			Requests:     stats.Requests,
-			Tokens:       stats.Tokens,
-			Cost:         stats.Cost,
-			StandardCost: stats.StandardCost,
-			UserCost:     stats.UserCost,
-		}
-
-		// 缓存窗口统计（1 分钟）
-		s.cache.windowStatsCache.Store(account.ID, &windowStatsCache{
-			stats:     windowStats,
-			timestamp: time.Now(),
-		})
-	}
-
-	// 为 FiveHour 添加 WindowStats（5h 窗口统计）
+	now := time.Now()
 	if usage.FiveHour != nil {
-		usage.FiveHour.WindowStats = windowStats
+		s.attachWindowStats(ctx, account.ID, usage.FiveHour, account.GetCurrentWindowStartTime())
+	}
+	if usage.SevenDay != nil {
+		s.attachWindowStats(
+			ctx,
+			account.ID,
+			usage.SevenDay,
+			codexWindowStatsStart(usage.SevenDay, 7*24*time.Hour, now),
+		)
+	}
+	if usage.SevenDaySonnet != nil {
+		s.attachWindowStats(
+			ctx,
+			account.ID,
+			usage.SevenDaySonnet,
+			codexWindowStatsStart(usage.SevenDaySonnet, 7*24*time.Hour, now),
+		)
 	}
 }
 

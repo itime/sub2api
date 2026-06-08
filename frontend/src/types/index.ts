@@ -1118,6 +1118,7 @@ export interface AdminDataAccount {
   credentials: Record<string, unknown>
   extra?: Record<string, unknown>
   proxy_key?: string | null
+  group_ids?: number[]
   concurrency: number
   priority: number
   rate_multiplier?: number | null
@@ -1132,13 +1133,29 @@ export interface AdminDataImportError {
   message: string
 }
 
+export type AdminDataImportAction = 'created' | 'updated' | 'reused' | 'skipped' | 'failed'
+
+export interface AdminDataImportItem {
+  kind: 'proxy' | 'account'
+  name?: string
+  action: AdminDataImportAction
+  message?: string
+  proxy_key?: string
+}
+
 export interface AdminDataImportResult {
+  proxies_received?: number
+  accounts_received?: number
   proxy_created: number
   proxy_reused: number
+  proxy_skipped?: number
   proxy_failed: number
   account_created: number
   account_updated?: number
+  account_skipped?: number
   account_failed: number
+  created_account_ids?: number[]
+  items?: AdminDataImportItem[]
   errors?: AdminDataImportError[]
 }
 

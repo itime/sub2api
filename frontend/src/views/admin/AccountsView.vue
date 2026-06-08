@@ -183,9 +183,11 @@
       <template #table>
         <AccountBulkActionsBar
           :selected-ids="selIds"
+          :testing="batchTestingConnection"
           @delete="handleBulkDelete"
           @reset-status="handleBulkResetStatus"
           @refresh-token="handleBulkRefreshToken"
+          @test-connection="handleBulkTestConnection"
           @edit-selected="openBulkEditSelected"
           @edit-filtered="openBulkEditFiltered"
           @clear="clearSelection"
@@ -287,6 +289,20 @@
           <template #cell-groups="{ row }">
             <AccountGroupsCell :groups="row.groups" :max-display="4" />
           </template>
+          <template #cell-usage_5h="{ row }">
+            <AccountUsageCell
+              :account="row"
+              window="5h"
+              :manual-refresh-token="usageManualRefreshToken"
+            />
+          </template>
+          <template #cell-usage_7d="{ row }">
+            <AccountUsageCell
+              :account="row"
+              window="7d"
+              :manual-refresh-token="usageManualRefreshToken"
+            />
+          </template>
           <template #header-usage="{ column }">
             <div class="flex items-center">
               <span>{{ column.label }}</span>
@@ -369,11 +385,26 @@
     <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :groups="groups" @close="showEdit = false" @updated="handleAccountUpdated" />
     <ReAuthAccountModal :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
     <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
+    <AccountBulkTestModal
+      :show="showBulkTest"
+      :scope="bulkTestScope"
+      :selected-count="selIds.length"
+      :resolve-account-ids="resolveBulkTestAccountIds"
+      @close="closeBulkTestModal"
+      @started="batchTestingConnection = true"
+      @completed="handleBulkTestCompleted"
+    />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
     <AccountActionMenu :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" :is-permanently-deactivated="isPermanentlyDeactivatedAccount(menu.acc)" />
     <SyncFromCrsModal :show="showSync" @close="showSync = false" @synced="reload" />
-    <ImportDataModal :show="showImportData" @close="showImportData = false" @imported="handleDataImported" />
+    <ImportDataModal
+      :show="showImportData"
+      :proxies="proxies"
+      :groups="groups"
+      @close="showImportData = false"
+      @imported="handleDataImported"
+    />
     <BulkEditAccountModal
       :show="showBulkEdit"
       :account-ids="selIds"
@@ -400,7 +431,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, toRaw, watch } from 'vue'
-import { useIntervalFn } from '@vueuse/core'
+import { useRoute, useRouter } from 'vue-router'
+import { useDebounceFn, useIntervalFn } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -423,6 +455,7 @@ import AccountActionMenu from '@/components/admin/account/AccountActionMenu.vue'
 import ImportDataModal from '@/components/admin/account/ImportDataModal.vue'
 import ReAuthAccountModal from '@/components/admin/account/ReAuthAccountModal.vue'
 import AccountTestModal from '@/components/admin/account/AccountTestModal.vue'
+import AccountBulkTestModal from '@/components/admin/account/AccountBulkTestModal.vue'
 import AccountStatsModal from '@/components/admin/account/AccountStatsModal.vue'
 import ScheduledTestsPanel from '@/components/admin/account/ScheduledTestsPanel.vue'
 import type { SelectOption } from '@/components/common/Select.vue'
@@ -436,12 +469,22 @@ import Icon from '@/components/icons/Icon.vue'
 import ErrorPassthroughRulesModal from '@/components/admin/ErrorPassthroughRulesModal.vue'
 import TLSFingerprintProfilesModal from '@/components/admin/TLSFingerprintProfilesModal.vue'
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
+import {
+  buildAccountsRouteQuery,
+  parseAccountsRouteQuery,
+  routeQueriesEqual,
+  type RouteQueryInput
+} from '@/utils/accountsRouteQuery'
+import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 import { formatDateTime, formatRelativeTime, formatCountdown } from '@/utils/format'
 import type { Account, AccountPlatform, AccountType, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel } from '@/types'
 
 const { t } = useI18n()
 const appStore = useAppStore()
 const authStore = useAuthStore()
+const route = useRoute()
+const router = useRouter()
+const defaultPageSize = getPersistedPageSize()
 
 const proxies = ref<AccountProxy[]>([])
 const groups = ref<AdminGroup[]>([])
@@ -552,15 +595,26 @@ const ACCOUNT_SORTABLE_KEYS = new Set([
   'last_used_at',
   'created_at',
   'expires_at',
-  'rate_limit_reset_at'
+  'rate_limit_reset_at',
+  'usage',
+  'usage_5h',
+  'usage_7d'
 ])
+const DEFAULT_ACCOUNT_SORT: AccountSortState = { sort_by: 'name', sort_order: 'asc' }
+
+const RATE_LIMITED_DEFAULT_SORT: AccountSortState = {
+  sort_by: 'rate_limit_reset_at',
+  sort_order: 'asc'
+}
+
 const loadInitialAccountSortState = (): AccountSortState => {
-  const fallback: AccountSortState = { sort_by: 'name', sort_order: 'asc' }
+  const fallback: AccountSortState = { ...DEFAULT_ACCOUNT_SORT }
   try {
     const raw = localStorage.getItem(ACCOUNT_SORT_STORAGE_KEY)
     if (!raw) return fallback
     const parsed = JSON.parse(raw) as { key?: string; order?: string }
-    const key = typeof parsed.key === 'string' ? parsed.key : ''
+    let key = typeof parsed.key === 'string' ? parsed.key : ''
+    if (key === 'usage') key = 'usage_7d'
     if (!ACCOUNT_SORTABLE_KEYS.has(key)) return fallback
     return {
       sort_by: key,
@@ -570,19 +624,32 @@ const loadInitialAccountSortState = (): AccountSortState => {
     return fallback
   }
 }
-const sortState = reactive<AccountSortState>(loadInitialAccountSortState())
+
+const resolveInitialSortState = (
+  fromRoute: AccountSortState | null,
+  status: AccountStatusTabValue
+): AccountSortState => {
+  if (fromRoute) return { ...fromRoute }
+  if (status === 'rate_limited') return { ...RATE_LIMITED_DEFAULT_SORT }
+  return loadInitialAccountSortState()
+}
+
+const initialRouteQuery = parseAccountsRouteQuery(route.query as RouteQueryInput, {
+  sortableKeys: ACCOUNT_SORTABLE_KEYS,
+  defaultPageSize
+})
+const sortState = reactive<AccountSortState>(
+  resolveInitialSortState(initialRouteQuery.sort, initialRouteQuery.status)
+)
 
 const apiSortBy = (key: string, status = '') => {
+  if (key === 'usage' || key === 'usage_7d') return 'usage_7d'
+  if (key === 'usage_5h') return 'usage_5h'
   // 限流 Tab：「恢复时间」列按 7d 窗口恢复时间排序（由早到晚）
   if (key === 'rate_limit_reset_at' && status === 'rate_limited') {
     return 'usage_7d_reset_at'
   }
   return key
-}
-
-const RATE_LIMITED_DEFAULT_SORT: AccountSortState = {
-  sort_by: 'rate_limit_reset_at',
-  sort_order: 'asc'
 }
 
 const persistAccountSortState = (key: string, order: AccountSortOrder) => {
@@ -626,7 +693,12 @@ const refreshTodayStatsBatch = async () => {
   // - today_stats column shows dedicated today's metrics.
   // - usage column also embeds today's stats for Key/Bedrock rows.
   // So we only skip fetching when BOTH columns are hidden.
-  if (hiddenColumns.has('today_stats') && hiddenColumns.has('usage')) {
+  if (
+    hiddenColumns.has('today_stats') &&
+    hiddenColumns.has('usage') &&
+    hiddenColumns.has('usage_5h') &&
+    hiddenColumns.has('usage_7d')
+  ) {
     todayStatsLoading.value = false
     todayStatsError.value = null
     return
@@ -765,7 +837,7 @@ const toggleColumn = (key: string) => {
   }
   saveColumnsToStorage()
   if (
-    (key === 'today_stats' || key === 'usage') &&
+    (key === 'today_stats' || key === 'usage' || key === 'usage_5h' || key === 'usage_7d') &&
     wasHidden
   ) {
     refreshTodayStatsBatch().catch((error) => {
@@ -788,16 +860,79 @@ const {
 } = useTableLoader<Account, any>({
   fetchFn: adminAPI.accounts.list,
   initialParams: {
-    platform: '',
-    type: '',
-    status: '',
-    privacy_mode: '',
-    group: '',
-    search: '',
-    sort_by: apiSortBy(sortState.sort_by, ''),
+    platform: initialRouteQuery.platform,
+    type: initialRouteQuery.type,
+    status: initialRouteQuery.status,
+    privacy_mode: initialRouteQuery.privacy_mode,
+    group: initialRouteQuery.group,
+    search: initialRouteQuery.search,
+    sort_by: apiSortBy(sortState.sort_by, initialRouteQuery.status),
     sort_order: sortState.sort_order
   }
 })
+
+if (initialRouteQuery.page) {
+  pagination.page = initialRouteQuery.page
+}
+if (initialRouteQuery.page_size) {
+  pagination.page_size = initialRouteQuery.page_size
+}
+
+const isApplyingRouteQuery = ref(false)
+const isSyncingRouteQuery = ref(false)
+
+const applyRouteQueryToState = () => {
+  const parsed = parseAccountsRouteQuery(route.query as RouteQueryInput, {
+    sortableKeys: ACCOUNT_SORTABLE_KEYS,
+    defaultPageSize
+  })
+
+  params.search = parsed.search
+  params.platform = parsed.platform
+  params.type = parsed.type
+  params.status = parsed.status
+  params.privacy_mode = parsed.privacy_mode
+  params.group = parsed.group
+
+  const nextSort = resolveInitialSortState(parsed.sort, parsed.status)
+  sortState.sort_by = nextSort.sort_by
+  sortState.sort_order = nextSort.sort_order
+  params.sort_by = apiSortBy(nextSort.sort_by, parsed.status)
+  params.sort_order = nextSort.sort_order
+
+  pagination.page = parsed.page ?? 1
+  if (parsed.page_size) {
+    pagination.page_size = parsed.page_size
+  }
+}
+
+const syncQueryToRoute = useDebounceFn(async () => {
+  if (isApplyingRouteQuery.value) return
+
+  const nextQuery = buildAccountsRouteQuery(route.query as RouteQueryInput, {
+    search: String(params.search ?? ''),
+    platform: String(params.platform ?? ''),
+    type: String(params.type ?? ''),
+    status: String(params.status ?? ''),
+    privacy_mode: String(params.privacy_mode ?? ''),
+    group: String(params.group ?? ''),
+    sort_by: sortState.sort_by,
+    sort_order: sortState.sort_order,
+    page: pagination.page,
+    page_size: pagination.page_size,
+    defaultPageSize,
+    defaultSort: DEFAULT_ACCOUNT_SORT
+  })
+
+  if (routeQueriesEqual(route.query as RouteQueryInput, nextQuery)) return
+
+  try {
+    isSyncingRouteQuery.value = true
+    await router.replace({ query: nextQuery })
+  } finally {
+    isSyncingRouteQuery.value = false
+  }
+}, 250)
 
 const {
   selectedIds: selIds,
@@ -816,6 +951,11 @@ const {
   rows: accounts,
   getId: (account) => account.id
 })
+
+const batchTestingConnection = ref(false)
+const showBulkTest = ref(false)
+const bulkTestScope = ref<'selected' | 'filtered'>('selected')
+const bulkTestPresetIds = ref<number[] | null>(null)
 
 const swipeVirtualContext: SwipeSelectVirtualContext = {
   getVirtualizer: () => dataTableRef.value?.virtualizer ?? null,
@@ -948,6 +1088,50 @@ watch(loading, (isLoading, wasLoading) => {
     })
   }
 })
+
+const snapshotAccountRouteState = () => ({
+  search: String(params.search ?? ''),
+  platform: String(params.platform ?? ''),
+  type: String(params.type ?? ''),
+  status: String(params.status ?? ''),
+  privacy_mode: String(params.privacy_mode ?? ''),
+  group: String(params.group ?? ''),
+  sort_by: sortState.sort_by,
+  sort_order: sortState.sort_order,
+  page: pagination.page,
+  page_size: pagination.page_size
+})
+
+watch(
+  snapshotAccountRouteState,
+  () => {
+    if (isApplyingRouteQuery.value) return
+    syncQueryToRoute()
+  }
+)
+
+watch(
+  () => route.query,
+  async () => {
+    if (isSyncingRouteQuery.value) return
+
+    const before = snapshotAccountRouteState()
+    isApplyingRouteQuery.value = true
+    try {
+      applyRouteQueryToState()
+    } finally {
+      isApplyingRouteQuery.value = false
+    }
+
+    const after = snapshotAccountRouteState()
+    const changed = (Object.keys(before) as Array<keyof typeof before>).some(
+      (key) => before[key] !== after[key]
+    )
+    if (changed) {
+      await load()
+    }
+  }
+)
 
 const isAnyModalOpen = computed(() => {
   return (
@@ -1236,6 +1420,8 @@ const allColumns = computed(() => {
     c.push({ key: 'groups', label: t('admin.accounts.columns.groups'), sortable: false })
   }
   c.push(
+    { key: 'usage_5h', label: t('admin.accounts.columns.usage5h'), sortable: true },
+    { key: 'usage_7d', label: t('admin.accounts.columns.usage7d'), sortable: true },
     { key: 'usage', label: t('admin.accounts.columns.usageWindows'), sortable: false },
     { key: 'proxy', label: t('admin.accounts.columns.proxy'), sortable: false },
     { key: 'priority', label: t('admin.accounts.columns.priority'), sortable: true },
@@ -1357,6 +1543,60 @@ const handleBulkRefreshToken = async () => {
     console.error('Failed to bulk refresh token:', error)
     appStore.showError(String(error))
   }
+}
+const openBulkTestModal = (scope: 'selected' | 'filtered', presetIds: number[] | null = null) => {
+  bulkTestScope.value = scope
+  bulkTestPresetIds.value = presetIds
+  showBulkTest.value = true
+}
+
+const closeBulkTestModal = () => {
+  showBulkTest.value = false
+  bulkTestPresetIds.value = null
+  batchTestingConnection.value = false
+}
+
+const resolveBulkTestAccountIds = async (): Promise<number[]> => {
+  if (bulkTestPresetIds.value && bulkTestPresetIds.value.length > 0) {
+    return [...bulkTestPresetIds.value]
+  }
+  if (bulkTestScope.value === 'selected') {
+    return [...selIds.value]
+  }
+  return fetchAllFilteredAccountIds()
+}
+
+const handleBulkTestConnection = () => {
+  if (selIds.value.length > 0) {
+    openBulkTestModal('selected')
+    return
+  }
+  openBulkTestModal('filtered')
+}
+
+const handleBulkTestCompleted = () => {
+  batchTestingConnection.value = false
+  if (bulkTestScope.value === 'selected' && selIds.value.length > 0) {
+    clearSelection()
+  }
+  reload()
+}
+
+const fetchAllFilteredAccountIds = async (): Promise<number[]> => {
+  const pageSize = 200
+  const ids: number[] = []
+  let page = 1
+  let totalPages = 1
+  const filters = buildAccountQueryFilters()
+
+  while (page <= totalPages) {
+    const response = await adminAPI.accounts.list(page, pageSize, filters)
+    ids.push(...response.items.map((account) => account.id))
+    totalPages = response.pages || 1
+    page++
+  }
+
+  return ids
 }
 const updateSchedulableInList = (accountIds: number[], schedulable: boolean) => {
   if (accountIds.length === 0) return
@@ -1515,7 +1755,16 @@ const handleBulkUpdated = () => {
   clearSelection()
   reload()
 }
-const handleDataImported = () => { showImportData.value = false; reload() }
+const handleDataImported = async (payload?: { createdAccountIds: number[]; testAfterImport: boolean }) => {
+  showImportData.value = false
+  reload()
+
+  if (!payload?.testAfterImport || payload.createdAccountIds.length === 0) {
+    return
+  }
+
+  openBulkTestModal('selected', payload.createdAccountIds)
+}
 const ACCOUNT_UNGROUPED_GROUP_QUERY_VALUE = 'ungrouped'
 const ACCOUNT_PRIVACY_MODE_UNSET_QUERY_VALUE = '__unset__'
 const buildAccountQueryFilters = () => ({

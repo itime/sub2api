@@ -619,14 +619,72 @@ export async function exportData(options?: {
   return data
 }
 
+export async function importArchive(
+  file: File,
+  options?: {
+    fast_import?: boolean
+    skip_default_group_bind?: boolean
+    default_proxy_id?: number | null
+    default_group_ids?: number[]
+    onUploadProgress?: (percent: number) => void
+  }
+): Promise<AdminDataImportResult> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('fast_import', String(options?.fast_import ?? true))
+  form.append('skip_default_group_bind', String(options?.skip_default_group_bind ?? true))
+  if (options?.default_proxy_id != null && options.default_proxy_id > 0) {
+    form.append('default_proxy_id', String(options.default_proxy_id))
+  }
+  if (options?.default_group_ids && options.default_group_ids.length > 0) {
+    form.append('default_group_ids', JSON.stringify(options.default_group_ids))
+  }
+
+  const { data } = await apiClient.post<AdminDataImportResult>(
+    '/admin/accounts/data/archive',
+    form,
+    {
+      timeout: 600000,
+      headers: { 'Content-Type': 'multipart/form-data' },
+      onUploadProgress: (event) => {
+        if (!options?.onUploadProgress || !event.total) return
+        options.onUploadProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)))
+      }
+    }
+  )
+  return data
+}
+
 export async function importData(payload: {
   data: AdminDataPayload
   skip_default_group_bind?: boolean
+  fast_import?: boolean
+  default_proxy_id?: number | null
+  default_group_ids?: number[]
 }): Promise<AdminDataImportResult> {
-  const { data } = await apiClient.post<AdminDataImportResult>('/admin/accounts/data', {
+  const body: Record<string, unknown> = {
     data: payload.data,
     skip_default_group_bind: payload.skip_default_group_bind
-  })
+  }
+  if (payload.fast_import != null) {
+    body.fast_import = payload.fast_import
+  }
+  if (payload.default_proxy_id != null && payload.default_proxy_id > 0) {
+    body.default_proxy_id = payload.default_proxy_id
+  }
+  if (payload.default_group_ids && payload.default_group_ids.length > 0) {
+    body.default_group_ids = payload.default_group_ids
+  }
+  const { data } = await apiClient.post<AdminDataImportResult>(
+    '/admin/accounts/data',
+    body,
+    {
+      timeout: 600000,
+      headers: {
+        'Idempotency-Key': crypto.randomUUID()
+      }
+    }
+  )
   return data
 }
 
@@ -674,11 +732,22 @@ export async function refreshOpenAIToken(
 /**
  * Batch operation result type
  */
+export interface BatchTestStats {
+  success: number
+  failed: number
+  deactivated: number
+  rate_limited: number
+  auth_error: number
+  updated: number
+}
+
 export interface BatchOperationResult {
   total: number
   success: number
   failed: number
-  errors?: Array<{ account_id: number; error: string }>
+  updated?: number
+  stats?: BatchTestStats
+  errors?: Array<{ account_id: number; error: string; status_code?: number; category?: string }>
   warnings?: Array<{ account_id: number; warning: string }>
 }
 
@@ -704,6 +773,25 @@ export async function batchRefresh(accountIds: number[]): Promise<BatchOperation
     account_ids: accountIds,
   }, {
     timeout: 120000  // 120s timeout for large batch refreshes
+  })
+  return data
+}
+
+/**
+ * Batch test account connectivity with concurrent upstream probes.
+ * @param accountIds - Array of account IDs
+ * @param options - Optional model ID and concurrency override
+ */
+export async function batchTestConnection(
+  accountIds: number[],
+  options?: { modelId?: string; concurrency?: number }
+): Promise<BatchOperationResult> {
+  const { data } = await apiClient.post<BatchOperationResult>('/admin/accounts/batch-test', {
+    account_ids: accountIds,
+    model_id: options?.modelId,
+    concurrency: options?.concurrency,
+  }, {
+    timeout: 600000,
   })
   return data
 }
@@ -755,10 +843,12 @@ export const accountsAPI = {
   syncFromCrs,
   exportData,
   importData,
+  importArchive,
   importCodexSession,
   getAntigravityDefaultModelMapping,
   batchClearError,
   batchRefresh,
+  batchTestConnection,
   setPrivacy
 }
 

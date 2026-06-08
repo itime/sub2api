@@ -206,7 +206,7 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(getUsage).toHaveBeenCalledWith(2000)
+    expect(getUsage).toHaveBeenCalledWith(2000, undefined)
     expect(wrapper.text()).toContain('5h|15|300')
     expect(wrapper.text()).toContain('7d|77|300')
   })
@@ -267,7 +267,7 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(getUsage).toHaveBeenCalledWith(2001)
+    expect(getUsage).toHaveBeenCalledWith(2001, undefined)
     // 单一数据源：始终使用 /usage API 返回值，忽略 codex 快照
     expect(wrapper.text()).toContain('5h|18|900')
     expect(wrapper.text()).toContain('7d|36|900')
@@ -338,7 +338,7 @@ describe('AccountUsageCell', () => {
 
     // 手动刷新再拉一次
     expect(getUsage).toHaveBeenCalledTimes(2)
-    expect(getUsage).toHaveBeenCalledWith(2010)
+    expect(getUsage).toHaveBeenCalledWith(2010, undefined)
     // 单一数据源：始终使用 /usage API 值
     expect(wrapper.text()).toContain('5h|18|900')
   })
@@ -393,7 +393,7 @@ describe('AccountUsageCell', () => {
 
 	await flushPromises()
 
-	expect(getUsage).toHaveBeenCalledWith(2002)
+	expect(getUsage).toHaveBeenCalledWith(2002, undefined)
 	expect(wrapper.text()).toContain('5h|0|27700')
 	expect(wrapper.text()).toContain('7d|0|27700')
   })
@@ -525,9 +525,65 @@ describe('AccountUsageCell', () => {
 
 	await flushPromises()
 
-  expect(getUsage).toHaveBeenCalledWith(2004)
+  expect(getUsage).toHaveBeenCalledWith(2004, undefined)
   expect(wrapper.text()).toContain('5h|100|106540000')
   expect(wrapper.text()).toContain('7d|100|106540000')
+  })
+
+  it('OpenAI OAuth 在 hideStandardWindows 时仍展示 5h/7d 用量条', async () => {
+    getUsage.mockResolvedValueOnce({
+      five_hour: {
+        utilization: 100,
+        resets_at: '2026-06-05T15:10:40+08:00',
+        remaining_seconds: 6819,
+        window_stats: {
+          requests: 216,
+          tokens: 26402790,
+          cost: 23.14,
+          standard_cost: 23.14,
+          user_cost: 23.14
+        }
+      },
+      seven_day: {
+        utilization: 16,
+        resets_at: '2026-06-12T10:10:40+08:00',
+        remaining_seconds: 593619,
+        window_stats: {
+          requests: 216,
+          tokens: 26402790,
+          cost: 23.14,
+          standard_cost: 23.14,
+          user_cost: 23.14
+        }
+      }
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 645,
+          platform: 'openai',
+          type: 'oauth',
+          extra: {}
+        }),
+        hideStandardWindows: true
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'utilization', 'resetsAt', 'windowStats', 'color'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ windowStats?.tokens }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('5h|100|26402790')
+    expect(wrapper.text()).toContain('7d|16|26402790')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.activeQuery')
   })
 
   it('Key 账号会展示 today stats 徽章并带 A/U 提示', async () => {
@@ -654,5 +710,99 @@ describe('AccountUsageCell', () => {
 		expect(wrapper.text()).toContain('0')
 		expect(wrapper.text()).toContain('A $0.00')
 		expect(wrapper.text()).toContain('U $0.00')
+  })
+
+  it('独立 5h 列在 /usage 返回后展示请求数与 token', async () => {
+    getUsage.mockResolvedValue({
+      five_hour: {
+        utilization: 42,
+        resets_at: '2099-03-07T12:00:00Z',
+        remaining_seconds: 3600,
+        window_stats: {
+          requests: 88,
+          tokens: 88000,
+          cost: 1.2,
+          standard_cost: 1.2,
+          user_cost: 1.2
+        }
+      },
+      seven_day: null
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 5001,
+          platform: 'openai',
+          type: 'oauth',
+          extra: {
+            codex_5h_used_percent: 40,
+            codex_5h_reset_at: '2099-03-07T12:00:00Z'
+          }
+        }),
+        window: '5h'
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'utilization', 'resetsAt', 'windowStats', 'color'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ windowStats?.tokens }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(getUsage).toHaveBeenCalledWith(5001, undefined)
+    expect(wrapper.text()).toContain('5h|42|88000')
+  })
+
+  it('独立 7d 列在 /usage 返回后展示请求数与 token', async () => {
+    getUsage.mockResolvedValue({
+      five_hour: null,
+      seven_day: {
+        utilization: 16,
+        resets_at: '2099-03-12T10:00:00Z',
+        remaining_seconds: 3600,
+        window_stats: {
+          requests: 12,
+          tokens: 12000,
+          cost: 0.5,
+          standard_cost: 0.5,
+          user_cost: 0.5
+        }
+      }
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 5002,
+          platform: 'openai',
+          type: 'oauth',
+          extra: {
+            codex_7d_used_percent: 15,
+            codex_7d_reset_at: '2099-03-12T10:00:00Z'
+          }
+        }),
+        window: '7d'
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'utilization', 'resetsAt', 'windowStats', 'color'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ windowStats?.tokens }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(getUsage).toHaveBeenCalledWith(5002, undefined)
+    expect(wrapper.text()).toContain('7d|16|12000')
   })
 })

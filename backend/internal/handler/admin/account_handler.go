@@ -1323,6 +1323,204 @@ func (h *AccountHandler) BatchRefresh(c *gin.Context) {
 	})
 }
 
+const (
+	batchTestDefaultConcurrency = 80
+	batchTestMaxConcurrency     = 200
+	batchTestMaxAccounts        = 5000
+)
+
+type batchTestStats struct {
+	Success      int `json:"success"`
+	Failed       int `json:"failed"`
+	Deactivated  int `json:"deactivated"`
+	RateLimited  int `json:"rate_limited"`
+	AuthError    int `json:"auth_error"`
+	Updated      int `json:"updated"`
+}
+
+// BatchTestConnection handles batch account connectivity probes with concurrent workers.
+// POST /api/v1/admin/accounts/batch-test
+func (h *AccountHandler) BatchTestConnection(c *gin.Context) {
+	if h.accountTestService == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Account test service is not configured")
+		return
+	}
+
+	var req struct {
+		AccountIDs  []int64 `json:"account_ids"`
+		ModelID     string  `json:"model_id"`
+		Concurrency int     `json:"concurrency"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if len(req.AccountIDs) == 0 {
+		response.BadRequest(c, "account_ids is required")
+		return
+	}
+	if len(req.AccountIDs) > batchTestMaxAccounts {
+		response.BadRequest(c, fmt.Sprintf("account_ids exceeds maximum of %d", batchTestMaxAccounts))
+		return
+	}
+
+	concurrency := req.Concurrency
+	if concurrency <= 0 {
+		concurrency = batchTestDefaultConcurrency
+	}
+	if concurrency > batchTestMaxConcurrency {
+		concurrency = batchTestMaxConcurrency
+	}
+
+	ctx := c.Request.Context()
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(concurrency)
+
+	var mu sync.Mutex
+	var successCount, failedCount, updatedCount int
+	var stats batchTestStats
+	var errors []gin.H
+
+	for _, id := range req.AccountIDs {
+		accountID := id
+		g.Go(func() error {
+			probeResult, account, probeLoadErr := h.accountTestService.QuickProbeAccountConnection(gctx, accountID, req.ModelID)
+			if probeLoadErr != nil {
+				mu.Lock()
+				failedCount++
+				stats.Failed++
+				errors = append(errors, gin.H{
+					"account_id": accountID,
+					"error":      probeLoadErr.Error(),
+					"category":   "failed",
+				})
+				mu.Unlock()
+				return nil
+			}
+
+			statusUpdated := false
+			if probeResult != nil && probeResult.Success {
+				if h.rateLimitService != nil {
+					if _, recoverErr := h.rateLimitService.RecoverAccountAfterSuccessfulTest(gctx, accountID); recoverErr != nil {
+						mu.Lock()
+						failedCount++
+						stats.Failed++
+						errors = append(errors, gin.H{
+							"account_id": accountID,
+							"error":      recoverErr.Error(),
+							"category":   "failed",
+						})
+						mu.Unlock()
+						return nil
+					}
+				} else if h.adminService != nil {
+					if _, clearErr := h.adminService.ClearAccountError(gctx, accountID); clearErr != nil {
+						mu.Lock()
+						failedCount++
+						stats.Failed++
+						errors = append(errors, gin.H{
+							"account_id": accountID,
+							"error":      clearErr.Error(),
+							"category":   "failed",
+						})
+						mu.Unlock()
+						return nil
+					}
+				}
+				statusUpdated = true
+				mu.Lock()
+				successCount++
+				stats.Success++
+				if statusUpdated {
+					updatedCount++
+					stats.Updated++
+				}
+				mu.Unlock()
+				return nil
+			}
+
+			if probeResult != nil && probeResult.StatusCode > 0 && account != nil && h.rateLimitService != nil {
+				headers := probeResult.Headers
+				if headers == nil {
+					headers = make(http.Header)
+				}
+				h.rateLimitService.HandleUpstreamError(gctx, account, probeResult.StatusCode, headers, probeResult.Body)
+				statusUpdated = true
+			}
+
+			message := "probe failed"
+			if probeResult != nil && probeResult.Message != "" {
+				message = probeResult.Message
+			}
+			category := classifyBatchProbeFailure(probeResult, account)
+
+			mu.Lock()
+			failedCount++
+			stats.Failed++
+			switch category {
+			case "deactivated":
+				stats.Deactivated++
+			case "rate_limited":
+				stats.RateLimited++
+			case "auth_error":
+				stats.AuthError++
+			}
+			if statusUpdated {
+				updatedCount++
+				stats.Updated++
+			}
+			errors = append(errors, gin.H{
+				"account_id":  accountID,
+				"error":       message,
+				"status_code": probeResultStatusCode(probeResult),
+				"category":    category,
+			})
+			mu.Unlock()
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	response.Success(c, gin.H{
+		"total":   len(req.AccountIDs),
+		"success": successCount,
+		"failed":  failedCount,
+		"updated": updatedCount,
+		"stats":   stats,
+		"errors":  errors,
+	})
+}
+
+func classifyBatchProbeFailure(result *service.AccountQuickProbeResult, account *service.Account) string {
+	if result == nil {
+		return "failed"
+	}
+	switch result.StatusCode {
+	case 429:
+		return "rate_limited"
+	case 401:
+		return "auth_error"
+	case 402:
+		if account != nil && account.Platform == service.PlatformOpenAI && strings.Contains(string(result.Body), "deactivated_workspace") {
+			return "deactivated"
+		}
+		return "failed"
+	default:
+		return "failed"
+	}
+}
+
+func probeResultStatusCode(result *service.AccountQuickProbeResult) int {
+	if result == nil {
+		return 0
+	}
+	return result.StatusCode
+}
+
 // BatchCreate handles batch creating accounts
 // POST /api/v1/admin/accounts/batch
 func (h *AccountHandler) BatchCreate(c *gin.Context) {

@@ -78,6 +78,7 @@
           label="7d"
           :utilization="usageInfo.seven_day.utilization"
           :resets-at="usageInfo.seven_day.resets_at"
+          :window-stats="usageInfo.seven_day.window_stats"
           color="emerald"
         />
 
@@ -87,6 +88,7 @@
           label="7d S"
           :utilization="usageInfo.seven_day_sonnet.utilization"
           :resets-at="usageInfo.seven_day_sonnet.resets_at"
+          :window-stats="usageInfo.seven_day_sonnet.window_stats"
           color="purple"
         />
 
@@ -129,25 +131,25 @@
 
     <!-- OpenAI OAuth accounts: single source from /usage API -->
     <template v-else-if="account.platform === 'openai' && account.type === 'oauth'">
-      <div v-if="hasOpenAIUsageFallback" class="space-y-1">
-        <UsageProgressBar
-          v-if="!hideStandardWindows && usageInfo?.five_hour"
-          label="5h"
-          :utilization="usageInfo.five_hour.utilization"
-          :resets-at="usageInfo.five_hour.resets_at"
-          :window-stats="usageInfo.five_hour.window_stats"
-          :show-now-when-idle="true"
-          color="indigo"
-        />
-        <UsageProgressBar
-          v-if="!hideStandardWindows && usageInfo?.seven_day"
-          label="7d"
-          :utilization="usageInfo.seven_day.utilization"
-          :resets-at="usageInfo.seven_day.resets_at"
-          :window-stats="usageInfo.seven_day.window_stats"
-          :show-now-when-idle="true"
-          color="emerald"
-        />
+      <!-- Loading state (initial passive fetch) -->
+      <div v-if="loading && !usageInfo" class="space-y-1.5">
+        <div class="flex items-center gap-1">
+          <div class="h-3 w-[32px] animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+          <div class="h-1.5 w-8 animate-pulse rounded-full bg-gray-200 dark:bg-gray-700"></div>
+          <div class="h-3 w-[32px] animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+        </div>
+        <div class="flex items-center gap-1">
+          <div class="h-3 w-[32px] animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+          <div class="h-1.5 w-8 animate-pulse rounded-full bg-gray-200 dark:bg-gray-700"></div>
+          <div class="h-3 w-[32px] animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+        </div>
+      </div>
+
+      <!-- Error state -->
+      <div v-else-if="error" class="space-y-1">
+        <div class="text-xs text-red-500">
+          {{ error }}
+        </div>
         <div class="flex items-center gap-1.5 mt-0.5">
           <button
             type="button"
@@ -173,19 +175,66 @@
           </button>
         </div>
       </div>
-      <div v-else-if="loading" class="space-y-1.5">
-        <div class="flex items-center gap-1">
-          <div class="h-3 w-[32px] animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
-          <div class="h-1.5 w-8 animate-pulse rounded-full bg-gray-200 dark:bg-gray-700"></div>
-          <div class="h-3 w-[32px] animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+
+      <!-- Usage data + active query (OpenAI only exposes 5h/7d here) -->
+      <div v-else class="space-y-1">
+        <div
+          v-if="usageInfo?.error"
+          class="text-xs text-amber-600 dark:text-amber-400 truncate max-w-[200px]"
+          :title="usageInfo.error"
+        >
+          {{ usageInfo.error }}
         </div>
-        <div class="flex items-center gap-1">
-          <div class="h-3 w-[32px] animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
-          <div class="h-1.5 w-8 animate-pulse rounded-full bg-gray-200 dark:bg-gray-700"></div>
-          <div class="h-3 w-[32px] animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+        <UsageProgressBar
+          v-if="usageInfo?.five_hour"
+          label="5h"
+          :utilization="usageInfo.five_hour.utilization"
+          :resets-at="usageInfo.five_hour.resets_at"
+          :window-stats="usageInfo.five_hour.window_stats"
+          :show-now-when-idle="true"
+          color="indigo"
+        />
+        <UsageProgressBar
+          v-if="usageInfo?.seven_day"
+          label="7d"
+          :utilization="usageInfo.seven_day.utilization"
+          :resets-at="usageInfo.seven_day.resets_at"
+          :window-stats="usageInfo.seven_day.window_stats"
+          :show-now-when-idle="true"
+          color="emerald"
+        />
+        <div v-if="!hasOpenAIUsageFallback && !activeQueryLoading" class="text-xs text-gray-400">-</div>
+        <div class="flex items-center gap-1.5 mt-0.5">
+          <span
+            v-if="usageInfo?.source === 'passive'"
+            class="text-[9px] text-gray-400 dark:text-gray-500 italic"
+          >
+            {{ t('admin.accounts.usageWindow.passiveSampled') }}
+          </span>
+          <button
+            type="button"
+            class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/30 transition-colors"
+            :disabled="activeQueryLoading"
+            @click="loadActiveUsage"
+          >
+            <svg
+              class="h-2.5 w-2.5"
+              :class="{ 'animate-spin': activeQueryLoading }"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+              />
+            </svg>
+            {{ t('admin.accounts.usageWindow.activeQuery') }}
+          </button>
         </div>
       </div>
-      <div v-else class="text-xs text-gray-400">-</div>
     </template>
 
     <!-- Antigravity OAuth accounts: fetch usage from API -->
@@ -680,7 +729,22 @@ const windowProgress = computed((): WindowProgressDisplay | null => {
 
   const fromExtra =
     codexProgressFromExtra(props.window) ?? anthropicWindowFromExtra(props.window)
-  if (fromExtra) return fromExtra
+  if (fromExtra) {
+    const apiProgress =
+      props.window === '5h' ? usageInfo.value?.five_hour : usageInfo.value?.seven_day
+    if (apiProgress?.window_stats) {
+      return { ...fromExtra, windowStats: apiProgress.window_stats }
+    }
+    // 独立 5h/7d 列：等 /usage 返回窗口统计后再展示，避免只有进度条没有 req/token。
+    if (
+      isWindowColumn.value &&
+      shouldFetchUsageForWindowColumn.value &&
+      (loading.value || activeQueryLoading.value)
+    ) {
+      return null
+    }
+    return fromExtra
+  }
 
   if (props.window === '7d' && quotaWeeklyBar.value) {
     return {
@@ -695,7 +759,10 @@ const windowProgress = computed((): WindowProgressDisplay | null => {
 const windowCellLoading = computed(() => {
   if (!isWindowColumn.value) return false
   if (windowProgress.value) return false
-  return shouldFetchUsageForWindowColumn.value && loading.value
+  return (
+    shouldFetchUsageForWindowColumn.value &&
+    (loading.value || activeQueryLoading.value)
+  )
 })
 
 const showGeminiTodayStats = computed(() => {
@@ -1225,12 +1292,20 @@ const attachVisibilityObserver = () => {
 
 const loadActiveUsage = async () => {
   activeQueryLoading.value = true
+  error.value = null
   try {
-    usageInfo.value = await adminAPI.accounts.getUsage(props.account.id, 'active', true)
+    const result = await adminAPI.accounts.getUsage(props.account.id, 'active', true)
+    if (!unmounted.value) {
+      usageInfo.value = result
+      _usageCache.set(props.account.id, { data: result, ts: Date.now() })
+    }
   } catch (e: any) {
-    console.error('Failed to load active usage:', e)
+    if (!unmounted.value) {
+      error.value = t('common.error')
+      console.error('Failed to load active usage:', e)
+    }
   } finally {
-    activeQueryLoading.value = false
+    if (!unmounted.value) activeQueryLoading.value = false
   }
 }
 

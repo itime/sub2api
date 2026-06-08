@@ -429,3 +429,95 @@ func TestImportDataUpdatesExistingOpenAIOAuthByEmail(t *testing.T) {
 	require.Equal(t, int64(42), adminSvc.schedulableUpdates[0].id)
 	require.True(t, adminSvc.schedulableUpdates[0].schedulable)
 }
+
+func TestImportDataAppliesDefaultProxyAndGroups(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+
+	adminSvc.proxies = []service.Proxy{
+		{
+			ID:       9,
+			Name:     "preset-proxy",
+			Protocol: "http",
+			Host:     "127.0.0.1",
+			Port:     7890,
+			Status:   service.StatusActive,
+		},
+	}
+
+	dataPayload := map[string]any{
+		"data": map[string]any{
+			"proxies": []map[string]any{},
+			"accounts": []map[string]any{
+				{
+					"name":        "fresh@example.com",
+					"platform":    service.PlatformOpenAI,
+					"type":        service.AccountTypeOAuth,
+					"credentials": map[string]any{"email": "fresh@example.com", "access_token": "new"},
+					"concurrency": 3,
+					"priority":    50,
+				},
+			},
+		},
+		"skip_default_group_bind": true,
+		"default_proxy_id":        9,
+		"default_group_ids":       []int64{3, 5},
+	}
+
+	body, _ := json.Marshal(dataPayload)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/data", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp dataImportResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, 1, resp.Data.AccountCreated)
+	require.Len(t, adminSvc.createdAccounts, 1)
+	require.NotNil(t, adminSvc.createdAccounts[0].ProxyID)
+	require.Equal(t, int64(9), *adminSvc.createdAccounts[0].ProxyID)
+	require.Equal(t, []int64{3, 5}, adminSvc.createdAccounts[0].GroupIDs)
+}
+
+func TestImportDataAcceptsCodexAccountType(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+
+	dataPayload := map[string]any{
+		"data": map[string]any{
+			"proxies": []map[string]any{},
+			"accounts": []map[string]any{
+				{
+					"name":     "niubi257112@edu.aiceo.dev",
+					"platform": service.PlatformOpenAI,
+					"type":     "codex",
+					"credentials": map[string]any{
+						"email":         "niubi257112@edu.aiceo.dev",
+						"access_token":  "access-token",
+						"refresh_token": "refresh-token",
+					},
+					"extra": map[string]any{
+						"import_source": "codex_session",
+					},
+					"concurrency": 3,
+					"priority":    50,
+				},
+			},
+		},
+		"skip_default_group_bind": true,
+	}
+
+	body, _ := json.Marshal(dataPayload)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/data", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp dataImportResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, 0, resp.Code)
+	require.Equal(t, 1, resp.Data.AccountCreated)
+	require.Len(t, adminSvc.createdAccounts, 1)
+	require.Equal(t, service.AccountTypeOAuth, adminSvc.createdAccounts[0].Type)
+	require.Equal(t, service.PlatformOpenAI, adminSvc.createdAccounts[0].Platform)
+}

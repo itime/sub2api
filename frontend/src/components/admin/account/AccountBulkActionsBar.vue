@@ -32,6 +32,13 @@
         <button @click="$emit('toggle-schedulable', false)" class="btn btn-warning btn-sm">{{ t('admin.accounts.bulkActions.disableScheduling') }}</button>
         <button @click="$emit('edit-selected')" class="btn btn-primary btn-sm">{{ t('admin.accounts.bulkActions.edit') }}</button>
       </template>
+      <button
+        @click="$emit('test-connection')"
+        class="btn btn-secondary btn-sm"
+        :disabled="testing"
+      >
+        {{ testing ? t('admin.accounts.bulkActions.testingConnection') : (selectedIds.length > 0 ? t('admin.accounts.bulkActions.testConnection') : t('admin.accounts.bulkActions.testConnectionFiltered')) }}
+      </button>
       <button @click="$emit('edit-filtered')" class="btn btn-primary btn-sm">
         {{ t('admin.accounts.bulkEdit.submit') }}
       </button>
@@ -41,5 +48,7 @@
 
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
-defineProps(['selectedIds']); defineEmits(['delete', 'edit-selected', 'edit-filtered', 'clear', 'select-page', 'toggle-schedulable', 'reset-status', 'refresh-token']); const { t } = useI18n()
+defineProps<{ selectedIds: number[]; testing?: boolean }>()
+defineEmits(['delete', 'edit-selected', 'edit-filtered', 'clear', 'select-page', 'toggle-schedulable', 'reset-status', 'refresh-token', 'test-connection'])
+const { t } = useI18n()
 </script>
