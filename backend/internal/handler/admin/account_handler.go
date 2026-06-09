@@ -1400,20 +1400,26 @@ func (h *AccountHandler) BatchTestConnection(c *gin.Context) {
 
 			statusUpdated := false
 			if probeResult != nil && probeResult.Success {
-				if h.rateLimitService != nil {
-					if _, recoverErr := h.rateLimitService.RecoverAccountAfterSuccessfulTest(gctx, accountID); recoverErr != nil {
-						mu.Lock()
-						failedCount++
-						stats.Failed++
-						errors = append(errors, gin.H{
-							"account_id": accountID,
-							"error":      recoverErr.Error(),
-							"category":   "failed",
-						})
-						mu.Unlock()
-						return nil
-					}
-				} else if h.adminService != nil {
+				var recoverErr error
+				statusUpdated, recoverErr = h.accountTestService.ApplyProbeResultToAccountState(
+					gctx,
+					account,
+					probeResult,
+					h.rateLimitService,
+				)
+				if recoverErr != nil {
+					mu.Lock()
+					failedCount++
+					stats.Failed++
+					errors = append(errors, gin.H{
+						"account_id": accountID,
+						"error":      recoverErr.Error(),
+						"category":   "failed",
+					})
+					mu.Unlock()
+					return nil
+				}
+				if !statusUpdated && h.rateLimitService == nil && h.adminService != nil {
 					if _, clearErr := h.adminService.ClearAccountError(gctx, accountID); clearErr != nil {
 						mu.Lock()
 						failedCount++
@@ -1426,8 +1432,8 @@ func (h *AccountHandler) BatchTestConnection(c *gin.Context) {
 						mu.Unlock()
 						return nil
 					}
+					statusUpdated = true
 				}
-				statusUpdated = true
 				mu.Lock()
 				successCount++
 				stats.Success++
@@ -1439,13 +1445,13 @@ func (h *AccountHandler) BatchTestConnection(c *gin.Context) {
 				return nil
 			}
 
-			if probeResult != nil && probeResult.StatusCode > 0 && account != nil && h.rateLimitService != nil {
-				headers := probeResult.Headers
-				if headers == nil {
-					headers = make(http.Header)
-				}
-				h.rateLimitService.HandleUpstreamError(gctx, account, probeResult.StatusCode, headers, probeResult.Body)
-				statusUpdated = true
+			if probeResult != nil && account != nil {
+				statusUpdated, _ = h.accountTestService.ApplyProbeResultToAccountState(
+					gctx,
+					account,
+					probeResult,
+					h.rateLimitService,
+				)
 			}
 
 			message := "probe failed"
