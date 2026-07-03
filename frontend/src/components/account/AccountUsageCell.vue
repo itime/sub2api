@@ -68,7 +68,7 @@
           label="5h"
           :utilization="usageInfo.five_hour.utilization"
           :resets-at="usageInfo.five_hour.resets_at"
-          :window-stats="usageInfo.five_hour.window_stats"
+          :window-stats="usageInfo.five_hour.window_stats ?? emptyWindowStats()"
           color="indigo"
         />
 
@@ -78,7 +78,7 @@
           label="7d"
           :utilization="usageInfo.seven_day.utilization"
           :resets-at="usageInfo.seven_day.resets_at"
-          :window-stats="usageInfo.seven_day.window_stats"
+          :window-stats="usageInfo.seven_day.window_stats ?? emptyWindowStats()"
           color="emerald"
         />
 
@@ -190,7 +190,7 @@
           label="5h"
           :utilization="usageInfo.five_hour.utilization"
           :resets-at="usageInfo.five_hour.resets_at"
-          :window-stats="usageInfo.five_hour.window_stats"
+          :window-stats="usageInfo.five_hour.window_stats ?? emptyWindowStats()"
           :show-now-when-idle="true"
           color="indigo"
         />
@@ -199,7 +199,7 @@
           label="7d"
           :utilization="usageInfo.seven_day.utilization"
           :resets-at="usageInfo.seven_day.resets_at"
-          :window-stats="usageInfo.seven_day.window_stats"
+          :window-stats="usageInfo.seven_day.window_stats ?? emptyWindowStats()"
           :show-now-when-idle="true"
           color="emerald"
         />
@@ -587,6 +587,14 @@ interface WindowProgressDisplay {
   windowStats?: WindowStats | null
 }
 
+const emptyWindowStats = (): WindowStats => ({
+  requests: 0,
+  tokens: 0,
+  cost: 0,
+  standard_cost: 0,
+  user_cost: 0
+})
+
 const props = withDefaults(
   defineProps<{
     account: Account
@@ -616,6 +624,7 @@ const loading = ref(false)
 const activeQueryLoading = ref(false)
 const error = ref<string | null>(null)
 const usageInfo = ref<AccountUsageInfo | null>(null)
+const usageFetchSettled = ref(false)
 const rootRef = ref<HTMLElement | null>(null)
 const isDesktopViewport = ref(
   typeof window === 'undefined' ? true : window.matchMedia(desktopViewportQuery).matches
@@ -712,44 +721,42 @@ const anthropicWindowFromExtra = (window: UsageWindowColumn): WindowProgressDisp
 const windowProgress = computed((): WindowProgressDisplay | null => {
   if (!isWindowColumn.value || !props.window) return null
 
-  if (props.window === '5h' && usageInfo.value?.five_hour) {
+  const apiProgress =
+    props.window === '5h' ? usageInfo.value?.five_hour : usageInfo.value?.seven_day
+
+  if (apiProgress) {
     return {
-      utilization: usageInfo.value.five_hour.utilization,
-      resetsAt: usageInfo.value.five_hour.resets_at ?? null,
-      windowStats: usageInfo.value.five_hour.window_stats
-    }
-  }
-  if (props.window === '7d' && usageInfo.value?.seven_day) {
-    return {
-      utilization: usageInfo.value.seven_day.utilization,
-      resetsAt: usageInfo.value.seven_day.resets_at ?? null,
-      windowStats: usageInfo.value.seven_day.window_stats
+      utilization: apiProgress.utilization,
+      resetsAt: apiProgress.resets_at ?? null,
+      windowStats: apiProgress.window_stats ?? emptyWindowStats()
     }
   }
 
   const fromExtra =
     codexProgressFromExtra(props.window) ?? anthropicWindowFromExtra(props.window)
-  if (fromExtra) {
-    const apiProgress =
-      props.window === '5h' ? usageInfo.value?.five_hour : usageInfo.value?.seven_day
-    if (apiProgress?.window_stats) {
-      return { ...fromExtra, windowStats: apiProgress.window_stats }
-    }
-    // 独立 5h/7d 列：等 /usage 返回窗口统计后再展示，避免只有进度条没有 req/token。
-    if (
-      isWindowColumn.value &&
-      shouldFetchUsageForWindowColumn.value &&
-      (loading.value || activeQueryLoading.value)
-    ) {
+
+  if (isWindowColumn.value && shouldFetchUsageForWindowColumn.value) {
+    if (loading.value || activeQueryLoading.value || !usageFetchSettled.value) {
       return null
     }
+    if (fromExtra) {
+      return {
+        ...fromExtra,
+        windowStats: emptyWindowStats()
+      }
+    }
+    return null
+  }
+
+  if (fromExtra) {
     return fromExtra
   }
 
   if (props.window === '7d' && quotaWeeklyBar.value) {
     return {
       utilization: quotaWeeklyBar.value.utilization,
-      resetsAt: quotaWeeklyBar.value.resetsAt
+      resetsAt: quotaWeeklyBar.value.resetsAt,
+      windowStats: emptyWindowStats()
     }
   }
 
@@ -761,7 +768,7 @@ const windowCellLoading = computed(() => {
   if (windowProgress.value) return false
   return (
     shouldFetchUsageForWindowColumn.value &&
-    (loading.value || activeQueryLoading.value)
+    (loading.value || activeQueryLoading.value || !usageFetchSettled.value)
   )
 })
 
@@ -1208,7 +1215,10 @@ const isAnthropicOAuthOrSetupToken = computed(() => {
 })
 
 const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?: boolean }) => {
-  if (!shouldFetchUsageForWindowColumn.value) return
+  if (!shouldFetchUsageForWindowColumn.value) {
+    usageFetchSettled.value = true
+    return
+  }
 
   // Check cache
   if (!options?.bypassCache) {
@@ -1216,6 +1226,7 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
     if (cached && Date.now() - cached.ts < USAGE_CACHE_TTL) {
       usageInfo.value = cached.data
       loading.value = false
+      usageFetchSettled.value = true
       return
     }
   }
@@ -1236,7 +1247,10 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
       console.error('Failed to load usage:', e)
     }
   } finally {
-    if (!unmounted.value) loading.value = false
+    if (!unmounted.value) {
+      loading.value = false
+      usageFetchSettled.value = true
+    }
   }
 }
 
@@ -1250,14 +1264,17 @@ const flushPendingAutoLoad = () => {
   })
 }
 
-const requestAutoLoad = (source?: 'passive' | 'active') => {
+const requestAutoLoad = (
+  source?: 'passive' | 'active',
+  options?: { bypassCache?: boolean }
+) => {
   if (!shouldFetchUsageForWindowColumn.value) return
   if (shouldLazyLoadOnMobile.value && !hasEnteredViewport.value) {
     pendingAutoLoad.value = true
     pendingAutoLoadSource.value = source
     return
   }
-  loadUsage({ source }).catch((e) => {
+  loadUsage({ source, bypassCache: options?.bypassCache }).catch((e) => {
     console.error('Failed to auto load usage:', e)
   })
 }
@@ -1420,8 +1437,19 @@ watch(openAIUsageRefreshKey, (nextKey, prevKey) => {
   if (!prevKey || nextKey === prevKey) return
   if (props.account.platform !== 'openai' || props.account.type !== 'oauth') return
 
-  requestAutoLoad()
+  usageFetchSettled.value = false
+  _usageCache.delete(props.account.id)
+  requestAutoLoad(undefined, { bypassCache: true })
 })
+
+watch(
+  () => props.account.id,
+  () => {
+    usageFetchSettled.value = false
+    usageInfo.value = null
+    error.value = null
+  }
+)
 
 watch(
   () => props.manualRefreshToken,
@@ -1430,6 +1458,7 @@ watch(
     if (!shouldFetchUsageForWindowColumn.value) return
 
     const source = isAnthropicOAuthOrSetupToken.value ? 'passive' : undefined
+    usageFetchSettled.value = false
     _usageCache.delete(props.account.id)
     loadUsage({ source, bypassCache: true }).catch((e) => {
       console.error('Failed to refresh usage after manual refresh:', e)

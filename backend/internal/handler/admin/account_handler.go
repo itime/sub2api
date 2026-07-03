@@ -11,6 +11,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -219,6 +221,8 @@ func (h *AccountHandler) buildAccountResponseWithRuntime(ctx context.Context, ac
 		}
 	}
 
+	h.enrichShadowParents(ctx, []AccountWithConcurrency{item})
+
 	return item
 }
 
@@ -367,6 +371,8 @@ func (h *AccountHandler) List(c *gin.Context) {
 
 		result[i] = item
 	}
+
+	h.enrichShadowParents(c.Request.Context(), result)
 
 	etag := buildAccountsListETag(result, total, page, pageSize, platform, accountType, status, search, lite)
 	if etag != "" {
@@ -861,6 +867,12 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 	if !account.IsOAuth() {
 		return nil, "", infraerrors.BadRequest("NOT_OAUTH", "cannot refresh non-OAuth account")
 	}
+	// spark 影子凭据由母账号管理、自身恒空,刷新无意义且会先打上游;在调用上游前早拒
+	// (覆盖单账号与批量两入口;批量侧将其计为 failed 并附说明)(外审第6轮)。
+	if account.IsCredentialShadow() {
+		return nil, "", infraerrors.BadRequest("SPARK_SHADOW_NO_REFRESH",
+			"cannot refresh spark shadow account; its credentials are managed by the parent account")
+	}
 
 	var newCredentials map[string]any
 
@@ -878,6 +890,7 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 				newCredentials[k] = v
 			}
 		}
+		newCredentials = service.NormalizeOpenAIPersonalAccessTokenCredentials(account, tokenInfo, newCredentials)
 	} else if account.Platform == service.PlatformGemini {
 		tokenInfo, err := h.geminiOAuthService.RefreshAccountToken(ctx, account)
 		if err != nil {
@@ -1161,6 +1174,21 @@ func (h *AccountHandler) ClearError(c *gin.Context) {
 	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
 }
 
+// RevertProxyFallback handles reverting account proxy to original before fallback.
+// POST /api/v1/admin/accounts/:id/revert-proxy-fallback
+func (h *AccountHandler) RevertProxyFallback(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	if err := h.adminService.RevertAccountProxyFallback(c.Request.Context(), id); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"message": "reverted"})
+}
+
 // BatchClearError handles batch clearing account errors
 // POST /api/v1/admin/accounts/batch-clear-error
 func (h *AccountHandler) BatchClearError(c *gin.Context) {
@@ -1327,6 +1355,7 @@ const (
 	batchTestDefaultConcurrency = 80
 	batchTestMaxConcurrency     = 200
 	batchTestMaxAccounts        = 5000
+	batchTestRetryConcurrency   = 15
 )
 
 type batchTestStats struct {
@@ -1380,108 +1409,127 @@ func (h *AccountHandler) BatchTestConnection(c *gin.Context) {
 	var successCount, failedCount, updatedCount int
 	var stats batchTestStats
 	var errors []gin.H
+	var retryAccountIDs []int64
 
-	for _, id := range req.AccountIDs {
-		accountID := id
-		g.Go(func() error {
-			probeResult, account, probeLoadErr := h.accountTestService.QuickProbeAccountConnection(gctx, accountID, req.ModelID)
-			if probeLoadErr != nil {
-				mu.Lock()
-				failedCount++
-				stats.Failed++
-				errors = append(errors, gin.H{
-					"account_id": accountID,
-					"error":      probeLoadErr.Error(),
-					"category":   "failed",
-				})
-				mu.Unlock()
-				return nil
+	recordBatchProbeFailure := func(
+		accountID int64,
+		probeResult *service.AccountQuickProbeResult,
+		account *service.Account,
+		statusUpdated bool,
+	) {
+		message := "probe failed"
+		if probeResult != nil && probeResult.Message != "" {
+			message = probeResult.Message
+		}
+		category := classifyBatchProbeFailure(probeResult, account)
+		failedCount++
+		stats.Failed++
+		switch category {
+		case "deactivated":
+			stats.Deactivated++
+		case "rate_limited":
+			stats.RateLimited++
+		case "auth_error":
+			stats.AuthError++
+		}
+		if statusUpdated {
+			updatedCount++
+			stats.Updated++
+			if category == "rate_limited" && account != nil && account.IsOpenAIOAuth() {
+				retryAccountIDs = append(retryAccountIDs, accountID)
 			}
+		} else {
+			retryAccountIDs = append(retryAccountIDs, accountID)
+		}
+		errors = append(errors, gin.H{
+			"account_id":  accountID,
+			"error":       message,
+			"status_code": probeResultStatusCode(probeResult),
+			"category":    category,
+		})
+	}
 
-			statusUpdated := false
-			if probeResult != nil && probeResult.Success {
-				var recoverErr error
-				statusUpdated, recoverErr = h.accountTestService.ApplyProbeResultToAccountState(
-					gctx,
-					account,
-					probeResult,
-					h.rateLimitService,
-				)
-				if recoverErr != nil {
-					mu.Lock()
-					failedCount++
-					stats.Failed++
-					errors = append(errors, gin.H{
-						"account_id": accountID,
-						"error":      recoverErr.Error(),
-						"category":   "failed",
-					})
-					mu.Unlock()
-					return nil
-				}
-				if !statusUpdated && h.rateLimitService == nil && h.adminService != nil {
-					if _, clearErr := h.adminService.ClearAccountError(gctx, accountID); clearErr != nil {
-						mu.Lock()
-						failedCount++
-						stats.Failed++
-						errors = append(errors, gin.H{
-							"account_id": accountID,
-							"error":      clearErr.Error(),
-							"category":   "failed",
-						})
-						mu.Unlock()
-						return nil
-					}
-					statusUpdated = true
-				}
-				mu.Lock()
-				successCount++
-				stats.Success++
-				if statusUpdated {
-					updatedCount++
-					stats.Updated++
-				}
-				mu.Unlock()
-				return nil
-			}
-
-			if probeResult != nil && account != nil {
-				statusUpdated, _ = h.accountTestService.ApplyProbeResultToAccountState(
-					gctx,
-					account,
-					probeResult,
-					h.rateLimitService,
-				)
-			}
-
-			message := "probe failed"
-			if probeResult != nil && probeResult.Message != "" {
-				message = probeResult.Message
-			}
-			category := classifyBatchProbeFailure(probeResult, account)
-
+	runBatchProbe := func(probeCtx context.Context, accountID int64) {
+		probeResult, account, probeLoadErr := h.accountTestService.QuickProbeAccountConnection(probeCtx, accountID, req.ModelID)
+		if probeLoadErr != nil {
 			mu.Lock()
 			failedCount++
 			stats.Failed++
-			switch category {
-			case "deactivated":
-				stats.Deactivated++
-			case "rate_limited":
-				stats.RateLimited++
-			case "auth_error":
-				stats.AuthError++
+			retryAccountIDs = append(retryAccountIDs, accountID)
+			errors = append(errors, gin.H{
+				"account_id": accountID,
+				"error":      probeLoadErr.Error(),
+				"category":   "failed",
+			})
+			mu.Unlock()
+			return
+		}
+
+		if probeResult != nil && probeResult.Success {
+			statusUpdated, recoverErr := h.accountTestService.ApplyProbeResultToAccountState(
+				probeCtx,
+				account,
+				probeResult,
+				h.rateLimitService,
+			)
+			if recoverErr != nil {
+				mu.Lock()
+				failedCount++
+				stats.Failed++
+				retryAccountIDs = append(retryAccountIDs, accountID)
+				errors = append(errors, gin.H{
+					"account_id": accountID,
+					"error":      recoverErr.Error(),
+					"category":   "failed",
+				})
+				mu.Unlock()
+				return
 			}
+			if !statusUpdated && h.rateLimitService == nil && h.adminService != nil {
+				if _, clearErr := h.adminService.ClearAccountError(probeCtx, accountID); clearErr != nil {
+					mu.Lock()
+					failedCount++
+					stats.Failed++
+					retryAccountIDs = append(retryAccountIDs, accountID)
+					errors = append(errors, gin.H{
+						"account_id": accountID,
+						"error":      clearErr.Error(),
+						"category":   "failed",
+					})
+					mu.Unlock()
+					return
+				}
+				statusUpdated = true
+			}
+			mu.Lock()
+			successCount++
+			stats.Success++
 			if statusUpdated {
 				updatedCount++
 				stats.Updated++
 			}
-			errors = append(errors, gin.H{
-				"account_id":  accountID,
-				"error":       message,
-				"status_code": probeResultStatusCode(probeResult),
-				"category":    category,
-			})
 			mu.Unlock()
+			return
+		}
+
+		statusUpdated := false
+		if probeResult != nil && account != nil {
+			statusUpdated, _ = h.accountTestService.ApplyProbeResultToAccountState(
+				probeCtx,
+				account,
+				probeResult,
+				h.rateLimitService,
+			)
+		}
+		mu.Lock()
+		recordBatchProbeFailure(accountID, probeResult, account, statusUpdated)
+		mu.Unlock()
+	}
+
+	for _, id := range req.AccountIDs {
+		accountID := id
+		g.Go(func() error {
+			runBatchProbe(gctx, accountID)
 			return nil
 		})
 	}
@@ -1489,6 +1537,48 @@ func (h *AccountHandler) BatchTestConnection(c *gin.Context) {
 	if err := g.Wait(); err != nil {
 		response.ErrorFrom(c, err)
 		return
+	}
+
+	if len(retryAccountIDs) > 0 {
+		retryIDs := append([]int64(nil), retryAccountIDs...)
+		retryG, retryCtx := errgroup.WithContext(ctx)
+		retryG.SetLimit(batchTestRetryConcurrency)
+		for _, id := range retryIDs {
+			accountID := id
+			retryG.Go(func() error {
+				probeResult, account, probeLoadErr := h.accountTestService.QuickProbeAccountConnection(retryCtx, accountID, req.ModelID)
+				if probeLoadErr != nil || probeResult == nil || account == nil || probeResult.Success {
+					return nil
+				}
+				statusUpdated, _ := h.accountTestService.ApplyProbeResultToAccountState(
+					retryCtx,
+					account,
+					probeResult,
+					h.rateLimitService,
+				)
+				if !statusUpdated {
+					return nil
+				}
+				mu.Lock()
+				updatedCount++
+				stats.Updated++
+				category := classifyBatchProbeFailure(probeResult, account)
+				switch category {
+				case "deactivated":
+					stats.Deactivated++
+				case "rate_limited":
+					stats.RateLimited++
+				case "auth_error":
+					stats.AuthError++
+				}
+				mu.Unlock()
+				return nil
+			})
+		}
+		if err := retryG.Wait(); err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
 	}
 
 	response.Success(c, gin.H{
@@ -1505,7 +1595,7 @@ func classifyBatchProbeFailure(result *service.AccountQuickProbeResult, account 
 	if result == nil {
 		return "failed"
 	}
-	switch result.StatusCode {
+	switch service.ResolvedProbeStatusCode(result) {
 	case 429:
 		return "rate_limited"
 	case 401:
@@ -1521,10 +1611,7 @@ func classifyBatchProbeFailure(result *service.AccountQuickProbeResult, account 
 }
 
 func probeResultStatusCode(result *service.AccountQuickProbeResult) int {
-	if result == nil {
-		return 0
-	}
-	return result.StatusCode
+	return service.ResolvedProbeStatusCode(result)
 }
 
 // BatchCreate handles batch creating accounts
@@ -2029,7 +2116,7 @@ func (h *AccountHandler) ResetQuota(c *gin.Context) {
 	}
 
 	if err := h.adminService.ResetAccountQuota(c.Request.Context(), accountID); err != nil {
-		response.InternalError(c, "Failed to reset account quota: "+err.Error())
+		response.ErrorFrom(c, err)
 		return
 	}
 
@@ -2278,6 +2365,56 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 	if account.Platform == service.PlatformAntigravity {
 		// 直接复用 antigravity.DefaultModels()，与 /v1/models 端点保持同步
 		response.Success(c, antigravity.DefaultModels())
+		return
+	}
+
+	// Handle Grok accounts
+	if account.Platform == service.PlatformGrok {
+		defaultModels := xai.DefaultModels()
+
+		hasExplicitMapping := false
+		switch rawMapping := account.Credentials["model_mapping"].(type) {
+		case map[string]any:
+			hasExplicitMapping = len(rawMapping) > 0
+		case map[string]string:
+			hasExplicitMapping = len(rawMapping) > 0
+		}
+		if !hasExplicitMapping {
+			response.Success(c, defaultModels)
+			return
+		}
+
+		mapping := account.GetModelMapping()
+		if len(mapping) == 0 {
+			response.Success(c, defaultModels)
+			return
+		}
+
+		defaultByID := make(map[string]xai.Model, len(defaultModels))
+		for _, model := range defaultModels {
+			defaultByID[model.ID] = model
+		}
+
+		requestedModels := make([]string, 0, len(mapping))
+		for requestedModel := range mapping {
+			requestedModels = append(requestedModels, requestedModel)
+		}
+		sort.Strings(requestedModels)
+
+		var models []xai.Model
+		for _, requestedModel := range requestedModels {
+			if defaultModel, found := defaultByID[requestedModel]; found {
+				models = append(models, defaultModel)
+				continue
+			}
+			models = append(models, xai.Model{
+				ID:          requestedModel,
+				Object:      "model",
+				OwnedBy:     "xai",
+				DisplayName: requestedModel,
+			})
+		}
+		response.Success(c, models)
 		return
 	}
 

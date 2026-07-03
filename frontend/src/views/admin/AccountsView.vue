@@ -17,6 +17,18 @@
             @create="showCreate = true"
           >
             <template #after>
+              <button
+                class="btn btn-secondary px-2 md:px-3"
+                :disabled="batchTestingConnection"
+                :title="t('admin.accounts.bulkTestAllHint')"
+                @click="openBulkTestAllModal"
+              >
+                <Icon name="play" size="sm" :class="[batchTestingConnection ? 'animate-pulse' : '']" />
+                <span class="hidden md:inline">
+                  {{ batchTestingConnection ? t('admin.accounts.bulkActions.testingConnection') : t('admin.accounts.bulkTestAll') }}
+                </span>
+              </button>
+
               <!-- Auto Refresh Dropdown -->
               <div class="relative" ref="autoRefreshDropdownRef">
                 <button
@@ -222,15 +234,18 @@
           <template #cell-select="{ row }">
             <input type="checkbox" :checked="isSelected(row.id)" @change="toggleSel(row.id)" class="rounded border-gray-300 text-primary-600 focus:ring-primary-500" />
           </template>
+          <template #cell-id="{ value }">
+            <span class="font-mono text-xs text-gray-500 dark:text-gray-400">#{{ value }}</span>
+          </template>
           <template #cell-name="{ row, value }">
             <div class="flex flex-col">
               <span class="font-medium text-gray-900 dark:text-white">{{ value }}</span>
               <span
-                v-if="row.extra?.email_address || row.extra?.email || row.credentials?.email"
+                v-if="accountDisplayEmail(row)"
                 class="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[200px]"
-                :title="String(row.extra?.email_address || row.extra?.email || row.credentials?.email)"
+                :title="accountDisplayEmail(row) + (row.parent_chatgpt_account_id ? ' · ' + row.parent_chatgpt_account_id : '')"
               >
-                {{ row.extra?.email_address || row.extra?.email || row.credentials?.email }}
+                {{ accountDisplayEmail(row) }}
               </span>
             </div>
           </template>
@@ -241,7 +256,10 @@
           <template #cell-platform_type="{ row }">
             <div class="flex min-w-0 flex-col gap-1">
               <div class="flex flex-wrap items-center gap-1">
-                <PlatformTypeBadge :platform="row.platform" :type="row.type" :plan-type="row.credentials?.plan_type" :privacy-mode="row.extra?.privacy_mode" :subscription-expires-at="row.credentials?.subscription_expires_at" />
+                <PlatformTypeBadge :platform="row.platform" :type="row.type"
+                  :plan-type="row.credentials?.plan_type || row.parent_plan_type"
+                  :privacy-mode="row.extra?.privacy_mode || row.parent_privacy_mode"
+                  :subscription-expires-at="row.credentials?.subscription_expires_at || row.parent_subscription_expires_at" />
                 <span
                   v-if="getAntigravityTierLabel(row)"
                   :class="['inline-block rounded px-1.5 py-0.5 text-[10px] font-medium', getAntigravityTierClass(row)]"
@@ -319,13 +337,25 @@
             />
           </template>
           <template #cell-proxy="{ row }">
-            <div v-if="row.proxy" class="flex items-center gap-2">
-              <span class="text-sm text-gray-700 dark:text-gray-300">{{ row.proxy.name }}</span>
-              <span v-if="row.proxy.country_code" class="text-xs text-gray-500 dark:text-gray-400">
-                ({{ row.proxy.country_code }})
-              </span>
+            <div class="flex flex-col gap-1">
+              <div v-if="row.proxy" class="flex items-center gap-2">
+                <span class="text-sm text-gray-700 dark:text-gray-300">{{ row.proxy.name }}</span>
+                <span v-if="row.proxy.country_code" class="text-xs text-gray-500 dark:text-gray-400">
+                  ({{ row.proxy.country_code }})
+                </span>
+              </div>
+              <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
+              <div v-if="row.proxy && row.proxy.expires_at" class="flex items-center gap-2 text-xs">
+                <span class="text-gray-600 dark:text-gray-300">{{ formatDateTime(row.proxy.expires_at) }}</span>
+                <span :class="proxyExpiryBadge(row.proxy)">{{ proxyExpiryText(row.proxy) }}</span>
+              </div>
+              <div v-if="row.proxy_fallback_origin_id" class="flex items-center gap-1">
+                <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200" :title="t('admin.accounts.fallbackActiveTip', { origin: row.proxy_fallback_origin_name })">
+                  {{ t('admin.accounts.fallbackActive') }}
+                </span>
+                <button class="text-xs px-1.5 py-0.5 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700" @click="onRevertFallback(row)">{{ t('admin.accounts.revertProxy') }}</button>
+              </div>
             </div>
-            <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
           </template>
           <template #cell-rate_multiplier="{ row }">
             <span class="text-sm font-mono text-gray-700 dark:text-gray-300">
@@ -387,16 +417,20 @@
     <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
     <AccountBulkTestModal
       :show="showBulkTest"
-      :scope="bulkTestScope"
+      :mode="bulkTestMode"
       :selected-count="selIds.length"
-      :resolve-account-ids="resolveBulkTestAccountIds"
+      :status-counts="statusCounts"
+      :initial-statuses="bulkTestInitialStatuses"
+      :resolve-selected-ids="resolveBulkTestSelectedIds"
+      :fetch-ids-by-statuses="fetchAccountIdsByStatuses"
       @close="closeBulkTestModal"
       @started="batchTestingConnection = true"
       @completed="handleBulkTestCompleted"
+      @refresh="handleBulkTestRefresh"
     />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
-    <AccountActionMenu :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" :is-permanently-deactivated="isPermanentlyDeactivatedAccount(menu.acc)" />
+    <AccountActionMenu :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" :is-permanently-deactivated="isPermanentlyDeactivatedAccount(menu.acc)" />
     <SyncFromCrsModal :show="showSync" @close="showSync = false" @synced="reload" />
     <ImportDataModal
       :show="showImportData"
@@ -418,6 +452,7 @@
     />
     <TempUnschedStatusModal :show="showTempUnsched" :account="tempUnschedAcc" @close="showTempUnsched = false" @reset="handleTempUnschedReset" />
     <ConfirmDialog :show="showDeleteDialog" :title="t('admin.accounts.deleteAccount')" :message="t('admin.accounts.deleteConfirm', { name: deletingAcc?.name })" :confirm-text="t('common.delete')" :cancel-text="t('common.cancel')" :danger="true" @confirm="confirmDelete" @cancel="showDeleteDialog = false" />
+    <ConfirmDialog :show="showCreateShadowDialog" :title="t('admin.accounts.createSparkShadow')" :message="t('admin.accounts.createSparkShadowConfirm', { name: creatingShadowAcc?.name })" @confirm="confirmCreateSparkShadow" @cancel="showCreateShadowDialog = false" />
     <ConfirmDialog :show="showExportDataDialog" :title="t('admin.accounts.dataExport')" :message="t('admin.accounts.dataExportConfirmMessage')" :confirm-text="t('admin.accounts.dataExportConfirm')" :cancel-text="t('common.cancel')" @confirm="handleExportData" @cancel="showExportDataDialog = false">
       <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
         <input type="checkbox" class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500" v-model="includeProxyOnExport" />
@@ -477,6 +512,7 @@ import {
 } from '@/utils/accountsRouteQuery'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 import { formatDateTime, formatRelativeTime, formatCountdown } from '@/utils/format'
+import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 import type { Account, AccountPlatform, AccountType, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel } from '@/types'
 
 const { t } = useI18n()
@@ -539,6 +575,7 @@ const showBulkEdit = ref(false)
 const bulkEditTarget = ref<AccountBulkEditTarget | null>(null)
 const showTempUnsched = ref(false)
 const showDeleteDialog = ref(false)
+const showCreateShadowDialog = ref(false)
 const showReAuth = ref(false)
 const showTest = ref(false)
 const showStats = ref(false)
@@ -547,6 +584,7 @@ const showTLSFingerprintProfiles = ref(false)
 const edAcc = ref<Account | null>(null)
 const tempUnschedAcc = ref<Account | null>(null)
 const deletingAcc = ref<Account | null>(null)
+const creatingShadowAcc = ref<Account | null>(null)
 const reAuthAcc = ref<Account | null>(null)
 const testingAcc = ref<Account | null>(null)
 const statsAcc = ref<Account | null>(null)
@@ -587,6 +625,7 @@ type AccountSortState = {
   sort_order: AccountSortOrder
 }
 const ACCOUNT_SORTABLE_KEYS = new Set([
+  'id',
   'name',
   'status',
   'schedulable',
@@ -954,7 +993,8 @@ const {
 
 const batchTestingConnection = ref(false)
 const showBulkTest = ref(false)
-const bulkTestScope = ref<'selected' | 'filtered'>('selected')
+const bulkTestMode = ref<'selected' | 'statuses'>('statuses')
+const bulkTestInitialStatuses = ref<AccountStatusTabValue[]>([])
 const bulkTestPresetIds = ref<number[] | null>(null)
 
 const swipeVirtualContext: SwipeSelectVirtualContext = {
@@ -1347,6 +1387,12 @@ function getAntigravityTierLabel(row: any): string | null {
   }
 }
 
+// 账号显示邮箱:优先账号自身(extra/credentials),影子账号回退母账号 parent_email。
+// 供名称单元格 v-if/标题/文本三处共用,避免同一回退链在模板里重复三次。
+function accountDisplayEmail(row: any): string {
+  return row.extra?.email_address || row.extra?.email || row.credentials?.email || row.parent_email || ''
+}
+
 type OpenAICompactBadgeState = 'active' | 'blocked' | 'auto'
 
 function getOpenAICompactState(row: any): OpenAICompactBadgeState | null {
@@ -1409,6 +1455,7 @@ const allColumns = computed(() => {
   const c = [
     { key: 'select', label: '', sortable: false },
     { key: 'name', label: t('admin.accounts.columns.name'), sortable: true },
+    { key: 'id', label: t('admin.accounts.columns.id'), sortable: true },
     { key: 'platform_type', label: t('admin.accounts.columns.platformType'), sortable: false },
     { key: 'capacity', label: t('admin.accounts.columns.capacity'), sortable: false },
     { key: 'status', label: t('admin.accounts.columns.status'), sortable: true },
@@ -1544,10 +1591,28 @@ const handleBulkRefreshToken = async () => {
     appStore.showError(String(error))
   }
 }
-const openBulkTestModal = (scope: 'selected' | 'filtered', presetIds: number[] | null = null) => {
-  bulkTestScope.value = scope
-  bulkTestPresetIds.value = presetIds
+const defaultBulkTestStatuses = (): AccountStatusTabValue[] => {
+  const current = (params.status as AccountStatusTabValue) || ''
+  if (current) {
+    return [current]
+  }
+  return ['active']
+}
+
+const openBulkTestModal = (
+  mode: 'selected' | 'statuses',
+  options?: { presetIds?: number[] | null; initialStatuses?: AccountStatusTabValue[] }
+) => {
+  bulkTestMode.value = mode
+  bulkTestInitialStatuses.value = options?.initialStatuses ?? defaultBulkTestStatuses()
+  bulkTestPresetIds.value = options?.presetIds ?? null
   showBulkTest.value = true
+}
+
+const openBulkTestAllModal = () => {
+  showAccountToolsDropdown.value = false
+  showAutoRefreshDropdown.value = false
+  openBulkTestModal('statuses', { initialStatuses: defaultBulkTestStatuses() })
 }
 
 const closeBulkTestModal = () => {
@@ -1556,14 +1621,11 @@ const closeBulkTestModal = () => {
   batchTestingConnection.value = false
 }
 
-const resolveBulkTestAccountIds = async (): Promise<number[]> => {
+const resolveBulkTestSelectedIds = async (): Promise<number[]> => {
   if (bulkTestPresetIds.value && bulkTestPresetIds.value.length > 0) {
     return [...bulkTestPresetIds.value]
   }
-  if (bulkTestScope.value === 'selected') {
-    return [...selIds.value]
-  }
-  return fetchAllFilteredAccountIds()
+  return [...selIds.value]
 }
 
 const handleBulkTestConnection = () => {
@@ -1571,32 +1633,71 @@ const handleBulkTestConnection = () => {
     openBulkTestModal('selected')
     return
   }
-  openBulkTestModal('filtered')
+  openBulkTestModal('statuses', { initialStatuses: defaultBulkTestStatuses() })
 }
 
-const handleBulkTestCompleted = () => {
+const handleBulkTestRefresh = async () => {
+  await reload()
+}
+
+const handleBulkTestCompleted = async () => {
   batchTestingConnection.value = false
-  if (bulkTestScope.value === 'selected' && selIds.value.length > 0) {
+  if (bulkTestMode.value === 'selected' && selIds.value.length > 0) {
     clearSelection()
   }
-  reload()
+  await reload()
 }
 
-const fetchAllFilteredAccountIds = async (): Promise<number[]> => {
-  const pageSize = 200
-  const ids: number[] = []
-  let page = 1
-  let totalPages = 1
-  const filters = buildAccountQueryFilters()
+const fetchAccountIdsByStatuses = async (
+  statuses: AccountStatusTabValue[],
+  signal?: AbortSignal
+): Promise<number[]> => {
+  if (statuses.length === 0) return []
+  if (signal?.aborted) return []
 
-  while (page <= totalPages) {
-    const response = await adminAPI.accounts.list(page, pageSize, filters)
-    ids.push(...response.items.map((account) => account.id))
-    totalPages = response.pages || 1
-    page++
+  const pageSize = 200
+  const pageConcurrency = 4
+  const idSet = new Set<number>()
+  const baseFilters = buildAccountQueryFilters()
+
+  const fetchStatusPages = async (status: AccountStatusTabValue) => {
+    if (signal?.aborted) return
+
+    const filters = { ...baseFilters, status }
+    const first = await adminAPI.accounts.list(1, pageSize, filters, { signal })
+    for (const account of first.items) {
+      idSet.add(account.id)
+    }
+
+    const totalPages = first.pages || 1
+    if (totalPages <= 1) return
+
+    const pages = Array.from({ length: totalPages - 1 }, (_, index) => index + 2)
+    let nextPageIndex = 0
+
+    const worker = async () => {
+      while (nextPageIndex < pages.length) {
+        if (signal?.aborted) return
+        const page = pages[nextPageIndex]
+        nextPageIndex += 1
+        const response = await adminAPI.accounts.list(page, pageSize, filters, { signal })
+        for (const account of response.items) {
+          idSet.add(account.id)
+        }
+      }
+    }
+
+    await Promise.all(
+      Array.from({ length: Math.min(pageConcurrency, pages.length) }, () => worker())
+    )
   }
 
-  return ids
+  for (const status of statuses) {
+    if (signal?.aborted) break
+    await fetchStatusPages(status)
+  }
+
+  return [...idSet]
 }
 const updateSchedulableInList = (accountIds: number[], schedulable: boolean) => {
   if (accountIds.length === 0) return
@@ -1763,7 +1864,7 @@ const handleDataImported = async (payload?: { createdAccountIds: number[]; testA
     return
   }
 
-  openBulkTestModal('selected', payload.createdAccountIds)
+  openBulkTestModal('selected', { presetIds: payload.createdAccountIds })
 }
 const ACCOUNT_UNGROUPED_GROUP_QUERY_VALUE = 'ungrouped'
 const ACCOUNT_PRIVACY_MODE_UNSET_QUERY_VALUE = '__unset__'
@@ -1894,7 +1995,13 @@ const handleExportData = async () => {
     link.download = filename
     link.click()
     URL.revokeObjectURL(url)
-    appStore.showSuccess(t('admin.accounts.dataExported'))
+    // spark 影子账号被后端排除出备份(其凭据透传母账号、调度配置不可经凭据型导入重建);
+    // 跳过非零时明确提示用户,避免「下载成功但少了账号」的静默丢失。
+    if (dataPayload.skipped_shadows && dataPayload.skipped_shadows > 0) {
+      appStore.showWarning(t('admin.accounts.dataExportedSkippedShadows', { count: dataPayload.skipped_shadows }))
+    } else {
+      appStore.showSuccess(t('admin.accounts.dataExported'))
+    }
   } catch (error: any) {
     appStore.showError(error?.message || t('admin.accounts.dataExportFailed'))
   } finally {
@@ -1958,15 +2065,70 @@ const handleResetQuota = async (a: Account) => {
     console.error('Failed to reset quota:', error)
   }
 }
+
+const privacyResultMessageKey = (account: Account): { type: 'success' | 'error'; key: string } => {
+  const mode = typeof account.extra?.privacy_mode === 'string' ? account.extra.privacy_mode : ''
+  if (account.platform === 'openai') {
+    switch (mode) {
+      case 'training_off':
+        return { type: 'success', key: 'admin.accounts.privacyTrainingOff' }
+      case 'training_set_cf_blocked':
+        return { type: 'error', key: 'admin.accounts.privacyCfBlocked' }
+      default:
+        return { type: 'error', key: 'admin.accounts.privacyFailed' }
+    }
+  }
+  if (account.platform === 'antigravity') {
+    if (mode === 'privacy_set') {
+      return { type: 'success', key: 'admin.accounts.privacyAntigravitySet' }
+    }
+    return { type: 'error', key: 'admin.accounts.privacyAntigravityFailed' }
+  }
+  return { type: 'error', key: 'admin.accounts.privacyFailed' }
+}
+
 const handleSetPrivacy = async (a: Account) => {
   try {
     const updated = await adminAPI.accounts.setPrivacy(a.id)
     patchAccountInList(updated)
     enterAutoRefreshSilentWindow()
-    appStore.showSuccess(t('common.success'))
+    const result = privacyResultMessageKey(updated)
+    if (result.type === 'success') {
+      appStore.showSuccess(t(result.key))
+    } else {
+      appStore.showError(t(result.key))
+    }
   } catch (error: any) {
     console.error('Failed to set privacy:', error)
     appStore.showError(error?.response?.data?.message || t('admin.accounts.privacyFailed'))
+  }
+}
+const onRevertFallback = async (a: Account) => {
+  try {
+    await adminAPI.accounts.revertProxyFallback(a.id)
+    appStore.showSuccess(t('admin.accounts.revertProxySuccess'))
+    reload()
+  } catch (error: any) {
+    console.error('Failed to revert proxy fallback:', error)
+    appStore.showError(error?.response?.data?.message || t('admin.accounts.revertProxyFailed'))
+  }
+}
+const handleCreateSparkShadow = (a: Account) => {
+  creatingShadowAcc.value = a
+  showCreateShadowDialog.value = true
+}
+const confirmCreateSparkShadow = async () => {
+  const a = creatingShadowAcc.value
+  if (!a) return
+  try {
+    await adminAPI.accounts.createSparkShadow(a.id, { name: `${a.name} (Spark)` })
+    showCreateShadowDialog.value = false
+    creatingShadowAcc.value = null
+    appStore.showSuccess(t('admin.accounts.createSparkShadowSuccess'))
+    reload()
+  } catch (error: any) {
+    console.error('Failed to create spark shadow:', error)
+    appStore.showError(error?.response?.data?.message || t('admin.accounts.createSparkShadowFailed'))
   }
 }
 const handleDelete = (a: Account) => { deletingAcc.value = a; showDeleteDialog.value = true }
@@ -2038,6 +2200,12 @@ const formatCreatedAt = (value: string | null | undefined) => {
 const isExpired = (value: number | null) => {
   if (!value) return false
   return value * 1000 <= Date.now()
+}
+// 所绑定代理的有效期(逻辑同 /admin/proxies,见 utils/proxyExpiry)
+const proxyExpiryBadge = (p: AccountProxy): string => proxyExpiryBadgeClass(p.expires_at, p.status)
+const proxyExpiryText = (p: AccountProxy): string => {
+  const { key, params } = proxyExpiryLabelKey(p.expires_at, p.status)
+  return params ? t(key, params) : t(key)
 }
 
 // 滚动时关闭操作菜单（不关闭列设置下拉菜单）

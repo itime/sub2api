@@ -47,13 +47,14 @@ func TestApplyProbeResultToAccountState_OpenAI401SetsError(t *testing.T) {
 	require.Equal(t, []int64{501}, repo.setErrorIDs)
 }
 
-func TestApplyProbeResultToAccountState_PermanentAuthCodeSetsErrorForNonOpenAI(t *testing.T) {
-	body := `{"error":{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"},"request_id":"req"}}`
+func TestApplyProbeResultToAccountState_Inferred401FromBodySetsError(t *testing.T) {
+	body := `{"error":{"message":"Your authentication token has been invalidated.","code":"token_invalidated"},"status":401}`
 	account := &Account{
-		ID:       502,
-		Platform: PlatformAnthropic,
-		Type:     AccountTypeAPIKey,
-		Status:   StatusActive,
+		ID:          502,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Credentials: map[string]any{"access_token": "token", "refresh_token": "refresh"},
 	}
 	repo := &probeStateTrackingRepo{
 		mockAccountRepoForGemini: mockAccountRepoForGemini{
@@ -63,13 +64,13 @@ func TestApplyProbeResultToAccountState_PermanentAuthCodeSetsErrorForNonOpenAI(t
 	svc := &AccountTestService{accountRepo: repo}
 	result := &AccountQuickProbeResult{
 		Success:    false,
-		StatusCode: http.StatusUnauthorized,
-		Body:       []byte(`{"error":{"message":"{\"error\":{\"code\":\"token_revoked\"}}","type":"invalid_request_error"}}`),
+		StatusCode: 0,
+		Message:    "Request failed: context deadline exceeded",
+		Body:       []byte(body),
 	}
 
 	updated, err := svc.ApplyProbeResultToAccountState(context.Background(), account, result, nil)
 	require.NoError(t, err)
 	require.True(t, updated)
 	require.Equal(t, []int64{502}, repo.setErrorIDs)
-	_ = body
 }

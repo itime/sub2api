@@ -206,6 +206,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
 import GroupSelector from '@/components/common/GroupSelector.vue'
 import { adminAPI } from '@/api/admin'
+import { describeHttpClientError } from '@/utils/apiError'
 import { partitionImportFiles } from '@/utils/importArchive'
 import {
   clearImportDataPreferences,
@@ -909,24 +910,50 @@ const IMPORT_BATCH_SIZE = 200
 const IMPORT_BATCH_CONCURRENCY = 8
 const IMPORT_PARSE_CONCURRENCY = 24
 
-const resolveImportErrorMessage = (error: unknown): string => {
+const resolveImportErrorMessage = (error: unknown, context?: string): string => {
   if (error instanceof SyntaxError) {
-    return t('admin.accounts.dataImportParseFailed')
+    return context
+      ? `[${context}] ${t('admin.accounts.dataImportParseFailed')}`
+      : t('admin.accounts.dataImportParseFailed')
   }
-  if (error instanceof Error && error.message.trim()) {
-    return error.message
+  return describeHttpClientError(error, {
+    context,
+    fallback: t('admin.accounts.dataImportFailed'),
+    t
+  })
+}
+
+const appendArchiveFailure = (
+  aggregated: AdminDataImportResult | null,
+  archiveName: string,
+  message: string
+): AdminDataImportResult => {
+  const failureItem: AdminDataImportItem = {
+    kind: 'account',
+    name: archiveName,
+    action: 'failed',
+    message
   }
-  if (error && typeof error === 'object') {
-    const row = error as Record<string, unknown>
-    if (typeof row.message === 'string' && row.message.trim()) {
-      return row.message
+  if (!aggregated) {
+    return {
+      proxies_received: 0,
+      accounts_received: 0,
+      proxy_created: 0,
+      proxy_reused: 0,
+      proxy_failed: 0,
+      account_created: 0,
+      account_updated: 0,
+      account_failed: 1,
+      items: [failureItem],
+      errors: [{ kind: 'account', message }]
     }
-    const code = row.code
-    if (code != null && String(code).trim()) {
-      return `${t('admin.accounts.dataImportFailed')} (${String(code)})`
-    }
   }
-  return t('admin.accounts.dataImportFailed')
+  return {
+    ...aggregated,
+    account_failed: aggregated.account_failed + 1,
+    items: [...(aggregated.items ?? []), failureItem],
+    errors: [...(aggregated.errors ?? []), { kind: 'account', message }]
+  }
 }
 
 const mergeImportResults = (
@@ -1026,35 +1053,30 @@ const importPayloadInBatches = async (
   }
 }
 
-const importArchivesInParallel = async (archiveFiles: File[]) => {
+const importArchivesSequentially = async (archiveFiles: File[]) => {
   if (archiveFiles.length === 0) {
     return null
   }
 
-  let completed = 0
   let aggregated: AdminDataImportResult | null = null
-  let nextIndex = 0
-  const archiveConcurrency = 2
   setImportProgress('archive', 0, archiveFiles.length)
 
-  const worker = async () => {
-    while (nextIndex < archiveFiles.length) {
-      const index = nextIndex
-      nextIndex += 1
-      const archive = archiveFiles[index]
+  for (let index = 0; index < archiveFiles.length; index += 1) {
+    const archive = archiveFiles[index]
+    setImportProgress('archive', index, archiveFiles.length)
+
+    try {
       const res = await adminAPI.accounts.importArchive(archive, {
         fast_import: fastImport.value,
         skip_default_group_bind: true,
         default_proxy_id: presetProxyId.value,
         default_group_ids: presetGroupIds.value,
         onUploadProgress: (percent) => {
-          const overall = ((completed + percent / 100) / archiveFiles.length) * 100
-          setImportProgress('archive', completed + 1, archiveFiles.length, 15 + overall * 0.35)
+          const overall = ((index + percent / 100) / archiveFiles.length) * 100
+          setImportProgress('archive', index + 1, archiveFiles.length, 15 + overall * 0.35)
         }
       })
       aggregated = aggregated ? mergeImportResults(aggregated, res) : res
-      completed += 1
-      setImportProgress('archive', completed, archiveFiles.length)
       parseSummary.value = [
         parseSummary.value.split('；').filter(Boolean).slice(0, 1).join('；'),
         t('admin.accounts.dataImportArchiveDone', {
@@ -1066,14 +1088,20 @@ const importArchivesInParallel = async (archiveFiles: File[]) => {
       ]
         .filter(Boolean)
         .join('；')
+    } catch (error: unknown) {
+      const message = resolveImportErrorMessage(error, archive.name)
+      aggregated = appendArchiveFailure(aggregated, archive.name, message)
+      parseSummary.value = [
+        parseSummary.value.split('；').filter(Boolean).slice(0, 1).join('；'),
+        message
+      ]
+        .filter(Boolean)
+        .join('；')
     }
+
+    setImportProgress('archive', index + 1, archiveFiles.length)
   }
 
-  const workers = Array.from(
-    { length: Math.min(archiveConcurrency, archiveFiles.length) },
-    () => worker()
-  )
-  await Promise.all(workers)
   return aggregated
 }
 
@@ -1170,7 +1198,7 @@ const handleImport = async () => {
     }
 
     if (archives.length > 0) {
-      const archiveResult = await importArchivesInParallel(archives)
+      const archiveResult = await importArchivesSequentially(archives)
       aggregatedResult = aggregatedResult && archiveResult
         ? mergeImportResults(aggregatedResult, archiveResult)
         : archiveResult ?? aggregatedResult

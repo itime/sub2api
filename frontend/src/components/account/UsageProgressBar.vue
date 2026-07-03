@@ -1,22 +1,23 @@
 <template>
   <div>
     <!-- Window stats row (above progress bar) -->
-    <div
-      v-if="windowStats && (windowStats.requests > 0 || windowStats.tokens > 0)"
-      class="mb-0.5 flex items-center"
-    >
-      <div class="flex items-center gap-1.5 text-[9px] text-gray-500 dark:text-gray-400">
+    <div v-if="windowStats" class="mb-0.5 flex items-center">
+      <div class="flex flex-wrap items-center gap-1.5 text-[9px] text-gray-500 dark:text-gray-400">
         <span class="rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-800">
           {{ formatRequests }} req
         </span>
         <span class="rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-800">
           {{ formatTokens }}
         </span>
-        <span class="rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-800" :title="t('usage.accountBilled')">
+        <span
+          v-if="showAccountCost"
+          class="rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-800"
+          :title="t('usage.accountBilled')"
+        >
           A ${{ formatAccountCost }}
         </span>
         <span
-          v-if="windowStats?.user_cost != null"
+          v-if="showUserCost"
           class="rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-800"
           :title="t('usage.userBilled')"
         >
@@ -149,7 +150,7 @@ const shouldShowResetTime = computed(() => {
 const formatResetTime = computed(() => {
   // For rolling windows, when utilization is 0%, treat as immediately available.
   if (props.showNowWhenIdle && props.utilization <= 0) {
-    return '现在'
+    return t('usage.resetNow')
   }
 
   if (!props.resetsAt) return '-'
@@ -157,7 +158,11 @@ const formatResetTime = computed(() => {
   const date = new Date(props.resetsAt)
   const diffMs = date.getTime() - now.value.getTime()
 
-  if (diffMs <= 0) return '现在'
+  // resetsAt 已过期：utilization>0 说明后端窗口数据还没刷新（active poll 没回写），
+  // 显示「待刷新」以区别于真正可用的「现在」。
+  if (diffMs <= 0) {
+    return props.utilization > 0 ? t('usage.resetPending') : t('usage.resetNow')
+  }
 
   const diffHours = Math.floor(diffMs / (1000 * 60 * 60))
   const diffMins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60))
@@ -191,6 +196,13 @@ const formatAccountCost = computed(() => {
 const formatUserCost = computed(() => {
   if (!props.windowStats || props.windowStats.user_cost == null) return '0.00'
   return props.windowStats.user_cost.toFixed(2)
+})
+
+const showAccountCost = computed(() => (props.windowStats?.cost ?? 0) > 0)
+
+const showUserCost = computed(() => {
+  if (props.windowStats?.user_cost == null) return false
+  return props.windowStats.user_cost > 0
 })
 
 </script>

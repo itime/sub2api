@@ -33,7 +33,7 @@ describe('UsageProgressBar', () => {
       }
     })
 
-    expect(wrapper.text()).toContain('现在')
+    expect(wrapper.text()).toContain('usage.resetNow')
     expect(wrapper.text()).not.toContain('2h 30m')
   })
 
@@ -49,7 +49,31 @@ describe('UsageProgressBar', () => {
     })
 
     expect(wrapper.text()).toContain('2h 30m')
-    expect(wrapper.text()).not.toContain('现在')
+    expect(wrapper.text()).not.toContain('usage.resetNow')
+    expect(wrapper.text()).not.toContain('usage.resetPending')
+  })
+
+  it('windowStats 为 0 时仍展示请求数与 token', () => {
+    const wrapper = mount(UsageProgressBar, {
+      props: {
+        label: '7d',
+        utilization: 5,
+        resetsAt: '2026-03-17T02:30:00Z',
+        color: 'emerald',
+        windowStats: {
+          requests: 0,
+          tokens: 0,
+          cost: 0,
+          standard_cost: 0,
+          user_cost: 0
+        }
+      }
+    })
+
+    expect(wrapper.text()).toContain('0 req')
+    expect(wrapper.text()).toContain('0')
+    expect(wrapper.text()).not.toContain('A $')
+    expect(wrapper.text()).not.toContain('U $')
   })
 
   it('showNowWhenIdle=false 时保持原有倒计时行为', () => {
@@ -64,6 +88,35 @@ describe('UsageProgressBar', () => {
     })
 
     expect(wrapper.text()).toContain('2h 30m')
-    expect(wrapper.text()).not.toContain('现在')
+    expect(wrapper.text()).not.toContain('usage.resetNow')
+  })
+
+  it('resetsAt 已过期且利用率大于 0 时显示「待刷新」', () => {
+    const wrapper = mount(UsageProgressBar, {
+      props: {
+        label: '5h',
+        utilization: 53,
+        // 早于 fake system time 2026-03-17T00:00:00Z
+        resetsAt: '2026-03-16T22:00:00Z',
+        color: 'indigo'
+      }
+    })
+
+    expect(wrapper.text()).toContain('usage.resetPending')
+    expect(wrapper.text()).not.toContain('usage.resetNow')
+  })
+
+  it('resetsAt 已过期且利用率为 0 时仍显示「现在」', () => {
+    const wrapper = mount(UsageProgressBar, {
+      props: {
+        label: '5h',
+        utilization: 0,
+        resetsAt: '2026-03-16T22:00:00Z',
+        color: 'indigo'
+      }
+    })
+
+    expect(wrapper.text()).toContain('usage.resetNow')
+    expect(wrapper.text()).not.toContain('usage.resetPending')
   })
 })

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 )
 
 // ApplyProbeResultToAccountState mirrors single-account test status side effects:
@@ -27,20 +26,36 @@ func (s *AccountTestService) ApplyProbeResultToAccountState(
 		return true, err
 	}
 
-	if result.StatusCode <= 0 || s.accountRepo == nil {
+	normalized := probeResultForStateUpdate(result)
+	if normalized == nil || s.accountRepo == nil {
 		return false, nil
 	}
 
-	if applied := s.applyDirectProbeAuthErrors(ctx, account, result); applied {
+	if applied := s.applyDirectProbeAuthErrors(ctx, account, normalized); applied {
 		return true, nil
 	}
 
+	statusCode := normalized.StatusCode
+	if statusCode <= 0 {
+		return false, nil
+	}
+
 	if rateLimit != nil {
-		headers := result.Headers
+		headers := normalized.Headers
 		if headers == nil {
 			headers = make(http.Header)
 		}
-		rateLimit.HandleUpstreamError(ctx, account, result.StatusCode, headers, result.Body)
+		// Auth failures must not be masked as short-lived rate limits during batch probes.
+		if statusCode == http.StatusTooManyRequests &&
+			account.IsOpenAIOAuth() &&
+			(probeBodyIndicatesAuthFailure(normalized.Body) || isPermanentUpstreamAuthFailure(normalized.Body)) {
+			errMsg := fmt.Sprintf("Authentication failed (401): %s", truncateProbeMessage(string(normalized.Body)))
+			if err := s.accountRepo.SetError(ctx, account.ID, errMsg); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		rateLimit.HandleUpstreamError(ctx, account, statusCode, headers, normalized.Body)
 		return true, nil
 	}
 
@@ -52,25 +67,23 @@ func (s *AccountTestService) applyDirectProbeAuthErrors(
 	account *Account,
 	result *AccountQuickProbeResult,
 ) bool {
+	if s == nil || account == nil || result == nil || s.accountRepo == nil {
+		return false
+	}
+
+	statusCode := resolvedProbeStatusCode(result)
 	bodySnippet := truncateProbeMessage(string(result.Body))
 
-	switch result.StatusCode {
-	case http.StatusUnauthorized:
-		if account.IsOpenAI() {
+	switch {
+	case statusCode == http.StatusUnauthorized:
+		if account.IsOpenAI() || isPermanentUpstreamAuthFailure(result.Body) || probeBodyIndicatesAuthFailure(result.Body) {
 			errMsg := fmt.Sprintf("Authentication failed (401): %s", bodySnippet)
 			if err := s.accountRepo.SetError(ctx, account.ID, errMsg); err != nil {
 				return false
 			}
 			return true
 		}
-		if isPermanentUpstreamAuthFailure(result.Body) {
-			errMsg := fmt.Sprintf("Authentication failed (401): %s", bodySnippet)
-			if err := s.accountRepo.SetError(ctx, account.ID, errMsg); err != nil {
-				return false
-			}
-			return true
-		}
-	case http.StatusForbidden:
+	case statusCode == http.StatusForbidden:
 		if account.IsOpenAI() {
 			errMsg := fmt.Sprintf("API returned 403: %s", bodySnippet)
 			if err := s.accountRepo.SetError(ctx, account.ID, errMsg); err != nil {
@@ -78,12 +91,13 @@ func (s *AccountTestService) applyDirectProbeAuthErrors(
 			}
 			return true
 		}
+	case account.IsOpenAIOAuth() && probeBodyIndicatesAuthFailure(result.Body):
+		errMsg := fmt.Sprintf("Authentication failed (401): %s", bodySnippet)
+		if err := s.accountRepo.SetError(ctx, account.ID, errMsg); err != nil {
+			return false
+		}
+		return true
 	}
 
 	return false
-}
-
-func isPermanentUpstreamAuthFailure(body []byte) bool {
-	code := strings.TrimSpace(extractUpstreamErrorCode(body))
-	return code == "token_invalidated" || code == "token_revoked"
 }

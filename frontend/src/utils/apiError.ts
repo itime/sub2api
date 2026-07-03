@@ -5,6 +5,8 @@
  * This utility extracts the user-facing message from any error shape.
  */
 
+import axios from 'axios'
+
 interface ApiErrorLike {
   status?: number
   code?: number | string
@@ -150,4 +152,59 @@ export function extractApiErrorMessage(
   // Last resort
   const str = String(err)
   return str === '[object Object]' ? fallback : str
+}
+
+type DescribeHttpClientErrorOptions = {
+  fallback?: string
+  /** File name or other context shown before the message. */
+  context?: string
+  t?: TranslateFn
+}
+
+/**
+ * Human-readable message for import/upload failures (timeouts, network, HTTP errors).
+ */
+export function describeHttpClientError(
+  err: unknown,
+  options?: DescribeHttpClientErrorOptions
+): string {
+  const prefix = options?.context ? `[${options.context}] ` : ''
+  const fallback = options?.fallback ?? 'Request failed'
+  const t = options?.t
+
+  if (axios.isAxiosError(err)) {
+    if (err.code === 'ECONNABORTED' || err.code === 'ERR_CANCELED') {
+      const timeoutMs = err.config?.timeout
+      const minutes = timeoutMs ? Math.max(1, Math.round(timeoutMs / 60000)) : undefined
+      if (t && minutes) {
+        return prefix + t('admin.accounts.dataImportTimeout', { minutes })
+      }
+      return prefix + (minutes ? `Request timed out after ${minutes} minutes` : 'Request timed out')
+    }
+
+    if (!err.response) {
+      const detail = err.message?.trim() || err.code || 'connection failed'
+      if (t) {
+        return prefix + t('admin.accounts.dataImportNetworkFailed', { detail })
+      }
+      return prefix + `Network error (${detail})`
+    }
+
+    const data = err.response.data
+    const apiRecord =
+      typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : undefined
+    const apiMsg =
+      (typeof apiRecord?.message === 'string' && apiRecord.message) ||
+      (typeof apiRecord?.detail === 'string' && apiRecord.detail) ||
+      ''
+    if (apiMsg.trim()) {
+      return prefix + `${apiMsg} (HTTP ${err.response.status})`
+    }
+    if (t) {
+      return prefix + t('admin.accounts.dataImportHttpFailed', { status: err.response.status })
+    }
+    return prefix + `HTTP ${err.response.status}`
+  }
+
+  return prefix + extractApiErrorMessage(err, fallback)
 }

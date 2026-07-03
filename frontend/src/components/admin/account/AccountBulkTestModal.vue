@@ -27,6 +27,55 @@
       </div>
 
       <div v-if="phase === 'form'" class="space-y-4">
+        <div v-if="mode === 'statuses'" class="space-y-2">
+          <div class="flex items-center justify-between gap-2">
+            <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+              {{ t('admin.accounts.bulkTest.statusFilterLabel') }}
+            </label>
+            <div class="flex gap-2 text-xs">
+              <button
+                type="button"
+                class="font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400"
+                @click="selectAllStatuses"
+              >
+                {{ t('admin.accounts.bulkTest.selectAllStatuses') }}
+              </button>
+              <span class="text-gray-300 dark:text-dark-600">|</span>
+              <button
+                type="button"
+                class="font-medium text-gray-600 hover:text-gray-800 dark:text-dark-300"
+                @click="clearStatuses"
+              >
+                {{ t('admin.accounts.bulkTest.clearStatuses') }}
+              </button>
+            </div>
+          </div>
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <label
+              v-for="option in statusOptions"
+              :key="option.value"
+              class="flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors"
+              :class="
+                isStatusSelected(option.value)
+                  ? 'border-primary-300 bg-primary-50 text-primary-900 dark:border-primary-700 dark:bg-primary-900/20 dark:text-primary-100'
+                  : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-dark-600 dark:bg-dark-800 dark:text-dark-200 dark:hover:bg-dark-700'
+              "
+            >
+              <input
+                type="checkbox"
+                class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                :checked="isStatusSelected(option.value)"
+                @change="toggleStatus(option.value)"
+              />
+              <span class="min-w-0 flex-1 truncate">{{ option.label }}</span>
+              <span class="tabular-nums text-xs text-gray-500 dark:text-dark-400">{{ formatStatusCount(option.count) }}</span>
+            </label>
+          </div>
+          <p class="text-xs text-gray-500 dark:text-dark-400">
+            {{ t('admin.accounts.bulkTest.statusFilterHint') }}
+          </p>
+        </div>
+
         <div class="space-y-1.5">
           <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
             {{ t('admin.accounts.selectTestModel') }}
@@ -43,15 +92,21 @@
         <div class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600 dark:border-dark-700 dark:bg-dark-800 dark:text-dark-300">
           <div>{{ t('admin.accounts.bulkTest.concurrencyHint', { workers: workerConcurrency }) }}</div>
           <div class="mt-1">{{ t('admin.accounts.bulkTest.accountCount', { count: resolvedCount }) }}</div>
-          <div v-if="!resolvingCount && resolvedCount === 0" class="mt-2 text-amber-700 dark:text-amber-300">
-            {{ t('admin.accounts.bulkActions.noSelection') }}
+          <div v-if="resolvedCount === 0" class="mt-2 text-amber-700 dark:text-amber-300">
+            {{ mode === 'selected' ? t('admin.accounts.bulkActions.noSelection') : t('admin.accounts.bulkTest.noStatusSelected') }}
+          </div>
+          <div
+            v-if="resolvedCount > BATCH_TEST_MAX"
+            class="mt-2 text-amber-700 dark:text-amber-300"
+          >
+            {{ t('admin.accounts.bulkTest.maxAccountsWarning', { max: BATCH_TEST_MAX, count: resolvedCount }) }}
           </div>
         </div>
       </div>
 
       <div v-else-if="phase === 'running'" class="space-y-4 py-1">
         <div class="text-sm font-medium text-gray-900 dark:text-white">
-          {{ t('admin.accounts.bulkTest.running') }}
+          {{ collectingIds ? t('admin.accounts.bulkTest.collectingAccounts') : t('admin.accounts.bulkTest.running') }}
         </div>
         <div class="h-2.5 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-dark-700">
           <div
@@ -142,82 +197,188 @@
         <button
           v-if="phase === 'form'"
           class="flex items-center gap-2 rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-primary-600 disabled:cursor-not-allowed disabled:bg-primary-400"
-          :disabled="!selectedModelId || resolvingCount || resolvedCount === 0"
+          :disabled="!canStartTest"
           @click="startTest"
         >
-          <Icon v-if="resolvingCount" name="refresh" size="sm" class="animate-spin" :stroke-width="2" />
-          <Icon v-else name="play" size="sm" :stroke-width="2" />
-          <span>{{ resolvingCount ? t('common.loading') : t('admin.accounts.startTest') }}</span>
+          <Icon name="play" size="sm" :stroke-width="2" />
+          <span>{{ t('admin.accounts.startTest') }}</span>
         </button>
-        <span v-else-if="phase === 'running'" class="text-sm text-gray-500 dark:text-dark-400">
-          {{ t('admin.accounts.testing') }}
-        </span>
         <button
-          v-else-if="phase === 'done'"
-          class="flex items-center gap-2 rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-primary-600"
-          @click="resetToForm"
+          v-else-if="phase === 'running'"
+          class="flex items-center gap-2 rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-red-600 disabled:cursor-not-allowed disabled:bg-red-400"
+          :disabled="stopping"
+          @click="stopTestAndRefresh"
         >
-          <Icon name="refresh" size="sm" :stroke-width="2" />
-          <span>{{ t('admin.accounts.retry') }}</span>
+          <Icon v-if="stopping" name="refresh" size="sm" class="animate-spin" :stroke-width="2" />
+          <Icon v-else name="x" size="sm" :stroke-width="2" />
+          <span>{{ stopping ? t('admin.accounts.bulkTest.stopping') : t('admin.accounts.bulkTest.stopAndRefresh') }}</span>
         </button>
+        <template v-else-if="phase === 'done'">
+          <button
+            class="rounded-lg bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-300 dark:hover:bg-dark-500"
+            @click="refreshList"
+          >
+            {{ t('admin.accounts.bulkTest.refreshList') }}
+          </button>
+          <button
+            class="flex items-center gap-2 rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-primary-600"
+            @click="resetToForm"
+          >
+            <Icon name="refresh" size="sm" :stroke-width="2" />
+            <span>{{ t('admin.accounts.retry') }}</span>
+          </button>
+        </template>
       </div>
     </template>
   </BaseDialog>
 </template>
 
 <script setup lang="ts">
+import axios from 'axios'
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Select from '@/components/common/Select.vue'
 import { Icon } from '@/components/icons'
 import { adminAPI } from '@/api/admin'
-import type { BatchTestStats } from '@/api/admin/accounts'
+import type { AccountStatusCounts, BatchTestStats } from '@/api/admin/accounts'
+import type { AccountStatusTabValue } from '@/components/admin/account/AccountStatusTabs.vue'
 import {
   buildDefaultBulkTestModels,
   defaultBulkTestModelId,
   type TestModelOption,
 } from '@/utils/testModelOptions'
 
-const CHUNK_SIZE = 120
-const PARALLEL_REQUESTS = 4
-const WORKER_CONCURRENCY = 100
+const CHUNK_SIZE = 80
+const PARALLEL_REQUESTS = 3
+const WORKER_CONCURRENCY = 60
+const BATCH_TEST_MAX = 5000
 
 const { t } = useI18n()
 
 type Phase = 'form' | 'running' | 'done'
 
+const statusOptionDefs: Array<{
+  value: AccountStatusTabValue
+  countKey: keyof AccountStatusCounts
+  labelKey: string
+}> = [
+  { value: 'active', countKey: 'active', labelKey: 'admin.accounts.status.active' },
+  { value: 'rate_limited', countKey: 'rate_limited', labelKey: 'admin.accounts.status.rateLimited' },
+  { value: 'inactive', countKey: 'inactive', labelKey: 'admin.accounts.status.inactive' },
+  { value: 'error', countKey: 'error', labelKey: 'admin.accounts.status.error' },
+  { value: 'temp_unschedulable', countKey: 'temp_unschedulable', labelKey: 'admin.accounts.status.tempUnschedulable' },
+  { value: 'unschedulable', countKey: 'unschedulable', labelKey: 'admin.accounts.status.unschedulable' },
+]
+
 const props = defineProps<{
   show: boolean
-  scope: 'selected' | 'filtered'
+  mode: 'selected' | 'statuses'
   selectedCount: number
-  resolveAccountIds: () => Promise<number[]>
+  statusCounts: AccountStatusCounts | null
+  initialStatuses: AccountStatusTabValue[]
+  resolveSelectedIds: () => Promise<number[]>
+  fetchIdsByStatuses: (statuses: AccountStatusTabValue[], signal?: AbortSignal) => Promise<number[]>
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'started'): void
   (e: 'completed'): void
+  (e: 'refresh'): void
 }>()
 
 const phase = ref<Phase>('form')
 const selectedModelId = ref('')
 const availableModels = ref<TestModelOption[]>(buildDefaultBulkTestModels())
+const selectedStatuses = ref<AccountStatusTabValue[]>([])
 const resolvedCount = ref(0)
-const resolvingCount = ref(false)
+const collectingIds = ref(false)
 const completedCount = ref(0)
 const totalCount = ref(0)
 const stats = ref<BatchTestStats>(emptyStats())
+const wasStopped = ref(false)
+const stopping = ref(false)
 let abortRequested = false
+let abortController: AbortController | null = null
 
 const workerConcurrency = WORKER_CONCURRENCY
 
+const statusOptions = computed(() =>
+  statusOptionDefs.map((option) => ({
+    value: option.value,
+    label: t(option.labelKey),
+    count: props.statusCounts?.[option.countKey] ?? 0,
+  }))
+)
+
 const scopeTitle = computed(() => {
-  if (props.scope === 'selected') {
+  if (props.mode === 'selected') {
     return t('admin.accounts.bulkTest.scopeSelected', { count: props.selectedCount })
   }
-  return t('admin.accounts.bulkTest.scopeFiltered')
+  return t('admin.accounts.bulkTest.scopeStatuses')
 })
+
+const canStartTest = computed(() => {
+  if (!selectedModelId.value || resolvedCount.value === 0) {
+    return false
+  }
+  if (props.mode === 'statuses' && selectedStatuses.value.length === 0) {
+    return false
+  }
+  if (resolvedCount.value > BATCH_TEST_MAX) {
+    return false
+  }
+  return true
+})
+
+const formatStatusCount = (count: number) => {
+  if (count >= 1000) {
+    return count.toLocaleString()
+  }
+  return String(count)
+}
+
+const isStatusSelected = (status: AccountStatusTabValue) => selectedStatuses.value.includes(status)
+
+const toggleStatus = (status: AccountStatusTabValue) => {
+  if (isStatusSelected(status)) {
+    selectedStatuses.value = selectedStatuses.value.filter((item: AccountStatusTabValue) => item !== status)
+  } else {
+    selectedStatuses.value = [...selectedStatuses.value, status]
+  }
+}
+
+const selectAllStatuses = () => {
+  selectedStatuses.value = statusOptionDefs.map((option) => option.value)
+}
+
+const clearStatuses = () => {
+  selectedStatuses.value = []
+}
+
+const estimateCountForStatuses = (statuses: AccountStatusTabValue[]) => {
+  if (!props.statusCounts || statuses.length === 0) return 0
+  return statuses.reduce((sum, status) => {
+    const def = statusOptionDefs.find((item) => item.value === status)
+    if (!def) return sum
+    return sum + (props.statusCounts?.[def.countKey] ?? 0)
+  }, 0)
+}
+
+const refreshResolvedCount = () => {
+  if (props.mode === 'selected') {
+    resolvedCount.value = props.selectedCount
+    return
+  }
+
+  if (selectedStatuses.value.length === 0) {
+    resolvedCount.value = 0
+    return
+  }
+
+  resolvedCount.value = estimateCountForStatuses(selectedStatuses.value)
+}
 
 const progressPercent = computed(() => {
   if (totalCount.value <= 0) return 0
@@ -237,23 +398,34 @@ const resultToneClass = computed(() =>
     : 'border-green-200 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-900/20 dark:text-green-200'
 )
 
-const resultHeadline = computed(() =>
-  stats.value.failed > 0
-    ? t('admin.accounts.bulkTest.resultPartial')
-    : t('admin.accounts.bulkTest.resultSuccess')
-)
+const resultHeadline = computed(() => {
+  if (wasStopped.value) {
+    return t('admin.accounts.bulkTest.resultStopped')
+  }
+  if (stats.value.failed > 0) {
+    return t('admin.accounts.bulkTest.resultPartial')
+  }
+  return t('admin.accounts.bulkTest.resultSuccess')
+})
 
-const resultSummary = computed(() =>
-  t('admin.accounts.bulkTest.resultSummary', {
+const resultSummary = computed(() => {
+  if (wasStopped.value) {
+    return t('admin.accounts.bulkTest.resultStoppedSummary', {
+      done: completedCount.value,
+      total: totalCount.value,
+      updated: stats.value.updated,
+    })
+  }
+  return t('admin.accounts.bulkTest.resultSummary', {
     success: stats.value.success,
     failed: stats.value.failed,
     updated: stats.value.updated,
   })
-)
+})
 
 watch(
   () => props.show,
-  async (visible) => {
+  (visible) => {
     if (!visible) {
       abortRequested = true
       return
@@ -261,16 +433,21 @@ watch(
     abortRequested = false
     resetToForm()
     selectedModelId.value = defaultBulkTestModelId(availableModels.value)
-    resolvingCount.value = true
-    try {
-      const ids = await props.resolveAccountIds()
-      resolvedCount.value = ids.length
-    } catch (error) {
-      console.error('Failed to resolve bulk test account ids:', error)
-      resolvedCount.value = props.scope === 'selected' ? props.selectedCount : 0
-    } finally {
-      resolvingCount.value = false
-    }
+    selectedStatuses.value = [...props.initialStatuses]
+    refreshResolvedCount()
+  }
+)
+
+watch(selectedStatuses, () => {
+  if (!props.show || props.mode !== 'statuses' || phase.value !== 'form') return
+  refreshResolvedCount()
+})
+
+watch(
+  () => props.selectedCount,
+  () => {
+    if (!props.show || props.mode !== 'selected' || phase.value !== 'form') return
+    refreshResolvedCount()
   }
 )
 
@@ -287,9 +464,31 @@ function emptyStats(): BatchTestStats {
 
 function resetToForm() {
   phase.value = 'form'
+  collectingIds.value = false
+  stopping.value = false
+  wasStopped.value = false
   completedCount.value = 0
   totalCount.value = 0
   stats.value = emptyStats()
+  abortRequested = false
+  abortController = null
+}
+
+function isAbortError(error: unknown): boolean {
+  if (axios.isCancel(error)) return true
+  if (error instanceof DOMException && error.name === 'AbortError') return true
+  if (error && typeof error === 'object' && (error as { code?: string }).code === 'ERR_CANCELED') {
+    return true
+  }
+  return false
+}
+
+function requestStop() {
+  if (phase.value !== 'running' || stopping.value) return
+  stopping.value = true
+  wasStopped.value = true
+  abortRequested = true
+  abortController?.abort()
 }
 
 function mergeStats(result: { stats?: BatchTestStats; success: number; failed: number; updated?: number }) {
@@ -318,6 +517,7 @@ function chunkArray<T>(items: T[], size: number): T[][] {
 
 async function runChunkQueue(chunks: number[][]) {
   const queue = [...chunks]
+  const signal = abortController?.signal
 
   const workers = Array.from({ length: PARALLEL_REQUESTS }, async () => {
     while (queue.length > 0) {
@@ -325,30 +525,63 @@ async function runChunkQueue(chunks: number[][]) {
       const chunk = queue.shift()
       if (!chunk || chunk.length === 0) continue
 
-      const result = await adminAPI.accounts.batchTestConnection(chunk, {
-        modelId: selectedModelId.value,
-        concurrency: WORKER_CONCURRENCY,
-      })
-      mergeStats(result)
-      completedCount.value += chunk.length
+      try {
+        const result = await adminAPI.accounts.batchTestConnection(chunk, {
+          modelId: selectedModelId.value,
+          concurrency: WORKER_CONCURRENCY,
+          signal,
+        })
+        if (abortRequested) return
+        mergeStats(result)
+        completedCount.value += chunk.length
+      } catch (error) {
+        if (abortRequested || isAbortError(error)) return
+        throw error
+      }
     }
   })
 
   await Promise.all(workers)
 }
 
+function finishRun(stopped: boolean) {
+  collectingIds.value = false
+  stopping.value = false
+  wasStopped.value = stopped
+  phase.value = 'done'
+  emit('completed')
+}
+
 const startTest = async () => {
   if (!selectedModelId.value || phase.value === 'running') return
 
   phase.value = 'running'
+  collectingIds.value = props.mode === 'statuses'
   completedCount.value = 0
   stats.value = emptyStats()
+  wasStopped.value = false
+  stopping.value = false
   abortRequested = false
+  abortController = new AbortController()
   emit('started')
 
   try {
-    const accountIds = await props.resolveAccountIds()
+    const accountIds =
+      props.mode === 'selected'
+        ? await props.resolveSelectedIds()
+        : await props.fetchIdsByStatuses(selectedStatuses.value, abortController.signal)
+
+    if (abortRequested) {
+      finishRun(true)
+      return
+    }
+
+    collectingIds.value = false
     if (accountIds.length === 0) {
+      phase.value = 'form'
+      return
+    }
+    if (accountIds.length > BATCH_TEST_MAX) {
       phase.value = 'form'
       return
     }
@@ -358,17 +591,30 @@ const startTest = async () => {
 
     const chunks = chunkArray(accountIds, CHUNK_SIZE)
     await runChunkQueue(chunks)
-
-    phase.value = 'done'
-    emit('completed')
+    finishRun(abortRequested)
   } catch (error) {
+    if (abortRequested || isAbortError(error)) {
+      finishRun(true)
+      return
+    }
     console.error('Bulk test connection failed:', error)
-    phase.value = 'done'
+    finishRun(false)
   }
 }
 
+const stopTestAndRefresh = () => {
+  requestStop()
+}
+
+const refreshList = () => {
+  emit('refresh')
+}
+
 const handleClose = () => {
-  if (phase.value === 'running') return
+  if (phase.value === 'running') {
+    stopTestAndRefresh()
+    return
+  }
   emit('close')
 }
 </script>

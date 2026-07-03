@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	quickProbeTimeout   = 20 * time.Second
+	quickProbeTimeout   = 40 * time.Second
 	quickProbeBodyLimit = 8 << 10
 )
 
@@ -31,9 +31,28 @@ type AccountQuickProbeResult struct {
 	LatencyMs  int64
 }
 
+const quickProbeRetryDelay = 400 * time.Millisecond
+
 // QuickProbeAccountConnection sends a minimal upstream request and returns without
 // consuming full SSE streams. Used by batch test to probe many accounts quickly.
 func (s *AccountTestService) QuickProbeAccountConnection(ctx context.Context, accountID int64, modelID string) (*AccountQuickProbeResult, *Account, error) {
+	result, account, err := s.quickProbeAccountConnectionOnce(ctx, accountID, modelID)
+	if !shouldRetryQuickProbe(account, result) {
+		return result, account, err
+	}
+
+	if err := probeSleepWithContext(ctx, quickProbeRetryDelay); err != nil {
+		return result, account, err
+	}
+
+	retryResult, retryAccount, retryErr := s.quickProbeAccountConnectionOnce(ctx, accountID, modelID)
+	if preferProbeResult(retryResult, result) {
+		return retryResult, retryAccount, retryErr
+	}
+	return result, account, err
+}
+
+func (s *AccountTestService) quickProbeAccountConnectionOnce(ctx context.Context, accountID int64, modelID string) (*AccountQuickProbeResult, *Account, error) {
 	if s == nil || s.accountRepo == nil {
 		return nil, nil, fmt.Errorf("account test service is not configured")
 	}
@@ -75,6 +94,56 @@ func (s *AccountTestService) QuickProbeAccountConnection(ctx context.Context, ac
 			result.LatencyMs = time.Since(startedAt).Milliseconds()
 		}
 		return result, account, probeErr
+	}
+}
+
+func shouldRetryQuickProbe(account *Account, result *AccountQuickProbeResult) bool {
+	if account == nil || result == nil || result.Success {
+		return false
+	}
+	if !account.IsOpenAI() {
+		return resolvedProbeStatusCode(result) <= 0
+	}
+	status := resolvedProbeStatusCode(result)
+	if status <= 0 {
+		return true
+	}
+	// Concurrent batch probes often hit transient 429s while the account is actually invalid.
+	return account.IsOpenAIOAuth() && status == http.StatusTooManyRequests
+}
+
+func preferProbeResult(retry, first *AccountQuickProbeResult) bool {
+	if retry == nil {
+		return false
+	}
+	if first == nil {
+		return true
+	}
+	retryStatus := resolvedProbeStatusCode(retry)
+	firstStatus := resolvedProbeStatusCode(first)
+	if retryStatus == http.StatusUnauthorized && firstStatus == http.StatusTooManyRequests {
+		return true
+	}
+	if retryStatus > 0 && firstStatus <= 0 {
+		return true
+	}
+	if probeBodyIndicatesAuthFailure(retry.Body) && !probeBodyIndicatesAuthFailure(first.Body) {
+		return true
+	}
+	if retry.Success && !first.Success {
+		return true
+	}
+	return false
+}
+
+func probeSleepWithContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -324,6 +393,15 @@ func (s *AccountTestService) executeQuickProbe(ctx context.Context, account *Acc
 	}
 
 	if resp.StatusCode == http.StatusOK {
+		if failStatus, failBody, isFailure := extractQuickProbeOKBodyFailure(body); isFailure {
+			return &AccountQuickProbeResult{
+				Success:    false,
+				StatusCode: failStatus,
+				Message:    fmt.Sprintf("API returned %d: %s", failStatus, truncateProbeMessage(string(failBody))),
+				Headers:    resp.Header.Clone(),
+				Body:       failBody,
+			}, nil
+		}
 		message := "ok"
 		if len(strings.TrimSpace(string(body))) > 0 {
 			message = truncateProbeMessage(string(body))

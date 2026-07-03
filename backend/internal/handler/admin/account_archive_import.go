@@ -3,18 +3,24 @@ package admin
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/gin-gonic/gin"
 )
 
-const importArchiveMaxBytes = 256 << 20 // 256MB
+const (
+	importArchiveMaxBytes       = 256 << 20 // 256MB
+	importArchiveProcessTimeout = 45 * time.Minute
+)
 
 // ImportDataArchive imports accounts from a zip or gzip-compressed JSON archive.
 // POST /api/v1/admin/accounts/data/archive
@@ -72,7 +78,28 @@ func (h *AccountHandler) ImportDataArchive(c *gin.Context) {
 		DefaultGroupIDs:      defaultGroupIDs,
 	}
 
-	result, importErr := h.importData(c.Request.Context(), req)
+	slog.Info(
+		"archive import started",
+		"filename", fileHeader.Filename,
+		"size_bytes", fileHeader.Size,
+		"accounts", len(accounts),
+		"skipped_entries", len(skipped),
+		"fast_import", fastImport,
+	)
+
+	startedAt := time.Now()
+	importCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), importArchiveProcessTimeout)
+	defer cancel()
+
+	result, importErr := h.importData(importCtx, req)
+	slog.Info(
+		"archive import finished",
+		"filename", fileHeader.Filename,
+		"duration_ms", time.Since(startedAt).Milliseconds(),
+		"account_created", result.AccountCreated,
+		"account_failed", result.AccountFailed,
+		"error", importErr,
+	)
 	if len(skipped) > 0 {
 		result.AccountSkipped += len(skipped)
 		for _, item := range skipped {

@@ -37,7 +37,7 @@
         class="btn btn-secondary btn-sm"
         :disabled="testing"
       >
-        {{ testing ? t('admin.accounts.bulkActions.testingConnection') : (selectedIds.length > 0 ? t('admin.accounts.bulkActions.testConnection') : t('admin.accounts.bulkActions.testConnectionFiltered')) }}
+        {{ testing ? t('admin.accounts.bulkActions.testingConnection') : (selectedIds.length > 0 ? t('admin.accounts.bulkActions.testConnection') : t('admin.accounts.bulkTestAll')) }}
       </button>
       <button @click="$emit('edit-filtered')" class="btn btn-primary btn-sm">
         {{ t('admin.accounts.bulkEdit.submit') }}
