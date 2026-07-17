@@ -186,11 +186,12 @@ EOF
 
 deploy_health_check() {
   local url="$1"
-  local retries="${2:-15}"
+  local retries="${2:-60}"
   local i=1
   while [ "$i" -le "$retries" ]; do
-    if curl -fsS "${url}/health" >/dev/null 2>&1; then
-      curl -fsS "${url}/health"
+    # Always bypass proxy for localhost health probes — shell HTTP_PROXY can break 127.0.0.1 checks.
+    if curl -fsS --noproxy '*' "${url}/health" >/dev/null 2>&1; then
+      curl -fsS --noproxy '*' "${url}/health"
       echo
       return 0
     fi
