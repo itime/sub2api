@@ -603,6 +603,7 @@ func (h *AccountHandler) importAccountsSequential(
 		if created.Platform == service.PlatformAntigravity && created.Type == service.AccountTypeOAuth {
 			*privacyAccounts = append(*privacyAccounts, created)
 		}
+		h.scheduleGrokImportProbe(created)
 		result.AccountCreated++
 		result.CreatedAccountIDs = append(result.CreatedAccountIDs, created.ID)
 		recordImportItem(result, DataImportItem{
@@ -704,6 +705,7 @@ func (h *AccountHandler) importAccountsFastConcurrent(
 			if created.Platform == service.PlatformAntigravity && created.Type == service.AccountTypeOAuth {
 				*privacyAccounts = append(*privacyAccounts, created)
 			}
+			h.scheduleGrokImportProbe(created)
 			result.AccountCreated++
 			result.CreatedAccountIDs = append(result.CreatedAccountIDs, created.ID)
 			recordImportItem(result, DataImportItem{

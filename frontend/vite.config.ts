@@ -97,7 +97,7 @@ export default defineConfig(({ mode }) => {
             }
 
             // Stripe 仅支付页动态加载，勿打进通用 vendor-misc
-            if (id.includes('/@stripe/')) {
+            if (id.includes('/@stripe/stripe-js/') || id.includes('/@stripe/')) {
               return 'vendor-stripe'
             }
 
